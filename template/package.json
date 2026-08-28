@@ -1,0 +1,25 @@
+{
+  "name": "lecture-template",
+  "private": true,
+  "version": "1.0.0",
+  "description": "五幕考研数学讲题视频封版模板（remotion_java Phase 1）",
+  "scripts": {
+    "studio": "remotion studio --no-open",
+    "render:169": "remotion render Lecture169 out/preview_169.mp4",
+    "render:916": "remotion render Lecture916 out/preview_916.mp4",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.220",
+    "katex": "^0.16.11",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.220"
+  },
+  "devDependencies": {
+    "@types/katex": "^0.16.7",
+    "@types/react": "^18.3.3",
+    "typescript": "^5.5.4",
+    "vitest": "^3.0.0"
+  }
+}
