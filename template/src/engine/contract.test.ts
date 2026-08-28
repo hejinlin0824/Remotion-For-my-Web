@@ -77,7 +77,7 @@ describe("validateContract", () => {
 
   it("⑥ act: 1 出现在 scenes 报错（白名单只允许 2/3/4）", () => {
     const scenes = content([
-      { id: "s01", act: 1, component: "problem-card", ttsText: "a", props: {} },
+      { id: "s01", act: 1, component: "problem-card", ttsText: "a", props: {} } as unknown as ContentJson["scenes"][number],
     ]);
     const errs = validateContract(scenes, audio([1]));
     expect(errs.length).toBeGreaterThan(0);
