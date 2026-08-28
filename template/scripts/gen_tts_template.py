@@ -17,8 +17,8 @@ FALLBACK_KEY_FILE = pathlib.Path(r"C:\Users\jinlin.he\Desktop\remotion参考(1)\
 
 VOICE, MODEL, THROTTLE, MAX_TAKES, DUR_RATIO = "Cherry", "qwen-tts", 3.0, 3, 0.92
 FIXED_LINES = {
-    "act1": "你好啊同学，我来帮你解决这道题，坐好发车！",
-    "act5": "这就是本道题的解法，希望能够帮到你，祝你考研一战上岸！",
+    "act1": "你好啊同学，本题由Whats your future为你解答，坐好发车",
+    "act5": "这就是本道题的解法，感谢你选择Whats Your Future，祝你一战上岸！",
 }
 
 def load_key() -> str:

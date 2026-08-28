@@ -8,11 +8,11 @@
   "fixed": {
     "act1": {
       "file": "audio/fixed/act1.wav",
-      "durationSec": 4.261
+      "durationSec": 5.201
     },
     "act5": {
       "file": "audio/fixed/act5.wav",
-      "durationSec": 5.641
+      "durationSec": 5.901
     }
   },
   "lines": [
