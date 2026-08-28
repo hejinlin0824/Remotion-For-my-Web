@@ -1,0 +1,6 @@
+workspace/
+artifacts/
+server/target/
+template/node_modules/
+secrets.local.yml
+*.local.yml
