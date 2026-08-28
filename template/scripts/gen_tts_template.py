@@ -2,7 +2,8 @@
 """
 gen_tts_template.py — 模板音频一次性生成（fixed 2 句 + content.json 全部场次）
 产出: public/audio/fixed/act1.wav act5.wav, public/audio/lines/line_NN.wav, src/data/audio_meta.json
-重跑: 删除 public/audio/lines 与 fixed 后整批重跑（禁止混批，防跨批次音色漂移）
+策略: 每句单 take + 完整性校验（Ruling-13，spec §12 的 3-take 烧满择优已作废），完整即采用，截断删产物重试
+重跑: 删除 public/audio/lines 与 fixed 后整批重跑（禁止混批，防跨批次音色漂移；禁单句补录）
 Key:  环境变量 DASHSCOPE_API_KEY 优先，否则解析旧项目 TTS 配置文件的 ApiKey 行
 """
 import json, math, os, pathlib, struct, sys, time
@@ -15,7 +16,8 @@ META_OUT = ROOT / "src" / "data" / "audio_meta.json"
 AUDIO_DIR = ROOT / "public" / "audio"
 FALLBACK_KEY_FILE = pathlib.Path(r"C:\Users\jinlin.he\Desktop\remotion参考(1)\remotion参考\TTS就选它.txt")
 
-VOICE, MODEL, THROTTLE, MAX_TAKES, DUR_RATIO = "Cherry", "qwen-tts", 3.0, 3, 0.92
+VOICE, MODEL, THROTTLE = "Cherry", "qwen-tts", 3.0
+MAX_ATTEMPTS = 3  # 每句失败重试上限（非择优 take；Ruling-13 单 take 策略）
 FIXED_LINES = {
     "act1": "你好啊同学，本题由Whats your future为你解答，坐好发车",
     "act5": "这就是本道题的解法，感谢你选择Whats Your Future，祝你一战上岸！",
@@ -96,10 +98,12 @@ def synth(key: str, text: str, dest: pathlib.Path) -> bool:
     return True
 
 def synthesize_line(key: str, text: str, dest: pathlib.Path) -> dict:
-    """≤3 take，完整性+时长过滤后取尾部最静。全败 sys.exit(1)。"""
-    takes = []
-    for take in range(MAX_TAKES):
-        tmp = dest.with_suffix(f".take{take+1}.wav")
+    """单 take 策略（Ruling-13：spec §12 的 3-take 烧满择优已作废）。
+    每句至多 MAX_ATTEMPTS 次尝试：合成 → tail_profile → is_complete 判定，
+    完整即直接采用返回（不再合成更多 take、不择优）；不完整则删除该次产物重试。
+    全部尝试均不完整/失败 → sys.exit(1)，提示删除 public/audio 整批重跑。"""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        tmp = dest.with_suffix(f".attempt{attempt}.wav")
         try:
             ok = synth(key, text, tmp)
         except Exception as e:
@@ -107,19 +111,19 @@ def synthesize_line(key: str, text: str, dest: pathlib.Path) -> dict:
             ok = False
         if ok:
             l80, p240, p480 = tail_profile(tmp)
+            t = {"last80": l80, "prev240": p240, "prev480": p480}
             dur = wav_duration(tmp)
-            takes.append({"dur": dur, "last80": l80, "prev240": p240, "prev480": p480, "path": tmp})
-            print(f"    take{take+1}: {dur:.2f}s last80={l80:.0f} {'完整' if is_complete(takes[-1]) else '截断'}")
-        time.sleep(THROTTLE)  # 3 take 烧满再择优（先时长过滤再取尾部最静），与 spec §12 一致
-    maxd = max((t["dur"] for t in takes), default=0)
-    cands = [t for t in takes if t["dur"] >= DUR_RATIO*maxd and is_complete(t)]
-    if not cands:
-        sys.exit(f"[fatal] 「{text[:18]}…」{MAX_TAKES} take 全败。删除 public/audio 整批重跑（禁单句补录）。")
-    best = min(cands, key=lambda t: t["last80"])
-    dest.write_bytes(best["path"].read_bytes())
-    for t in takes:
-        t["path"].unlink()
-    return {"durationSec": round(best["dur"], 3)}
+            if is_complete(t):
+                print(f"    attempt{attempt}: {dur:.2f}s last80={l80:.0f} 完整 → 采用")
+                dest.write_bytes(tmp.read_bytes())
+                tmp.unlink()
+                return {"durationSec": round(dur, 3)}
+            print(f"    attempt{attempt}: {dur:.2f}s last80={l80:.0f} 截断 → 删除重试")
+            tmp.unlink()
+        elif tmp.exists():
+            tmp.unlink()
+        time.sleep(THROTTLE)  # 请求间隔 ≥3s 节流；完整即采用，截断才重试（Ruling-13）
+    sys.exit(f"[fatal] 「{text[:18]}…」{MAX_ATTEMPTS} 次尝试均未合成出完整音频。删除 public/audio 整批重跑（禁单句补录）。")
 
 def main() -> None:
     key = load_key()
