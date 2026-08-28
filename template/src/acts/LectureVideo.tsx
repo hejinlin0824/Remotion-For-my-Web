@@ -1,4 +1,5 @@
 // src/acts/LectureVideo.tsx — 占位，仅验证渲染链路
+import "katex/dist/katex.min.css";
 import { AbsoluteFill } from "remotion";
 import { COLORS, FONT_FAMILY } from "../engine/constants";
 
