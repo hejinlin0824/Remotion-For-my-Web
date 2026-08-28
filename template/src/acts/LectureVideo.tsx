@@ -7,6 +7,7 @@ import { Act1Intro } from "./Act1Intro";
 import { Act5Outro } from "./Act5Outro";
 import { ProblemStage } from "./ProblemStage";
 import { Act2Knowledge } from "./Act2Knowledge";
+import { Act3Solution } from "./Act3Solution";
 import { ChapterTitle } from "./components/ChapterTitle";
 
 export const LectureVideo: React.FC<{ aspect: "16:9" | "9:16" }> = ({ aspect }) => {
@@ -25,7 +26,8 @@ export const LectureVideo: React.FC<{ aspect: "16:9" | "9:16" }> = ({ aspect }) 
       {/* 幕2-4 */}
       <ProblemStage content={content} timeline={timeline} layout={layout} />
       <Act2Knowledge content={content} timeline={timeline} layout={layout} />
-      {/* Act3 / Act4: Task 10 / 11 */}
+      <Act3Solution content={content} timeline={timeline} layout={layout} />
+      {/* Act4: Task 11 */}
       {timeline.chapterSlots.map((c) => (
         <Sequence key={c.act} from={c.fromFrame} durationInFrames={CHAPTER_F}>
           <ChapterTitle title={c.title} durFrames={CHAPTER_F} />
