@@ -2,7 +2,7 @@
 """
 qa_glm.py — GLM-5.3-flash 客观审帧（重叠/乱码/黑字/越界/公式崩坏，不审审美）
 用法: python scripts/qa_glm.py [png ...]   （缺省审 out/qa/ 全部 png）
-Key: ZHIPU_API_KEY / GLM_API_KEY / ANTHROPIC_AUTH_TOKEN 环境变量，回落 ~/.claude/settings.json
+Key: ZHIPU_API_KEY / ZHIPUAI_API_KEY / GLM_API_KEY 环境变量，回落 ~/.claude/settings.json 的 env.ANTHROPIC_AUTH_TOKEN
 输出: out/qa/report.md；任一 FAIL → exit 1
 """
 import base64, json, mimetypes, os, pathlib, sys, time
@@ -20,7 +20,7 @@ PROMPT = (
 )
 
 def load_key():
-    for k in ("ZHIPU_API_KEY", "ZHIPUAI_API_KEY", "GLM_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    for k in ("ZHIPU_API_KEY", "ZHIPUAI_API_KEY", "GLM_API_KEY"):
         if os.environ.get(k):
             return os.environ[k].strip()
     settings = pathlib.Path.home() / ".claude" / "settings.json"
@@ -44,7 +44,7 @@ def check(key, path):
                 "x-api-key": key, "Authorization": f"Bearer {key}",
                 "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
                 json=body, timeout=180)
-            if r.status_code == 429:
+            if r.status_code == 429 or r.status_code >= 500:
                 time.sleep(20 * (attempt + 1)); continue
             if r.status_code != 200:
                 return f"[error] {r.status_code} {r.text[:200]}", False
@@ -73,6 +73,8 @@ def main():
             fails.append(p.name)
         time.sleep(2)
     out = root/"out"/"qa"/"report.md"
+    if out.exists():
+        out.replace(out.with_name("report_prev.md"))  # 写前备份上一轮报告
     out.write_text("\n".join(lines), encoding="utf-8")
     print(f"\n报告: {out}；FAIL {len(fails)}/{len(targets)}")
     sys.exit(1 if fails else 0)
