@@ -1,1 +1,139 @@
-{}
+{
+  "voice": "Cherry",
+  "model": "qwen-tts",
+  "rate": 1.0,
+  "fps": 30,
+  "breathSec": 0.18,
+  "act5TailSec": 2.0,
+  "fixed": {
+    "act1": {
+      "file": "audio/fixed/act1.wav",
+      "durationSec": 4.261
+    },
+    "act5": {
+      "file": "audio/fixed/act5.wav",
+      "durationSec": 5.641
+    }
+  },
+  "lines": [
+    {
+      "index": 1,
+      "sceneId": "s01",
+      "file": "audio/lines/line_01.wav",
+      "durationSec": 9.541,
+      "text": "我们先看这道题。三行信息：一个三次函数，一个在 R 上单调递增的条件，最后要 a 的取值范围。"
+    },
+    {
+      "index": 2,
+      "sceneId": "s02",
+      "file": "audio/lines/line_02.wav",
+      "durationSec": 10.841,
+      "text": "第一件事，回顾考点。可导函数单调递增，等价于导数恒大于等于零。注意，是大于等于，不是严格大于。"
+    },
+    {
+      "index": 3,
+      "sceneId": "s03",
+      "file": "audio/lines/line_03.wav",
+      "durationSec": 9.501,
+      "text": "那什么时候一个二次式恒非负？开口向上，判别式小于等于零，两个条件缺一不可。"
+    },
+    {
+      "index": 4,
+      "sceneId": "s04",
+      "file": "audio/lines/line_04.wav",
+      "durationSec": 9.481,
+      "text": "这类恒成立问题，二次结构优先用判别式法，参数能分离就用分离参数法，两条路都要会。"
+    },
+    {
+      "index": 5,
+      "sceneId": "s05",
+      "file": "audio/lines/line_05.wav",
+      "durationSec": 8.901,
+      "text": "进入解法。第一步，对 f(x) 求导，导数是一个二次函数，3x 方加 2ax 加 1。"
+    },
+    {
+      "index": 6,
+      "sceneId": "s06",
+      "file": "audio/lines/line_06.wav",
+      "durationSec": 9.381,
+      "text": "求导这里用幂函数法则，x 的三次方下来变成平方，一次项照抄，常数项求导直接归零。"
+    },
+    {
+      "index": 7,
+      "sceneId": "s07",
+      "file": "audio/lines/line_07.wav",
+      "durationSec": 8.841,
+      "text": "第二步，最关键的翻译：在 R 上单调递增，就是说导数在全体实数上恒大于等于零。"
+    },
+    {
+      "index": 8,
+      "sceneId": "s08",
+      "file": "audio/lines/line_08.wav",
+      "durationSec": 12.701,
+      "text": "第三步，把恒非负落到二次函数上。开口向上已经满足，剩下判别式要小于等于零，也就是 4a 方减 12 小于等于零。"
+    },
+    {
+      "index": 9,
+      "sceneId": "s09",
+      "file": "audio/lines/line_09.wav",
+      "durationSec": 8.821,
+      "text": "判别式自己算一遍：2a 的平方就是 4a 方，再减去 4 乘 3 乘 1，也就是减 12。"
+    },
+    {
+      "index": 10,
+      "sceneId": "s10",
+      "file": "audio/lines/line_10.wav",
+      "durationSec": 13.401,
+      "text": "第四步，解这个不等式。4a 方小于等于 12，a 方小于等于 3，开方得到负根号 3 小于等于 a 小于等于根号 3。"
+    },
+    {
+      "index": 11,
+      "sceneId": "s11",
+      "file": "audio/lines/line_11.wav",
+      "durationSec": 9.301,
+      "text": "最后下结论：a 属于闭区间，负根号 3 到根号 3。两个端点都取得到，千万别写成开的。"
+    },
+    {
+      "index": 12,
+      "sceneId": "s12",
+      "file": "audio/lines/line_12.wav",
+      "durationSec": 9.541,
+      "text": "第一个易错点：把条件写成导数严格大于零。判别式等于零的临界情形就被你丢了，两个端点直接没了。"
+    },
+    {
+      "index": 13,
+      "sceneId": "s13",
+      "file": "audio/lines/line_13.wav",
+      "durationSec": 9.221,
+      "text": "第二个易错点：开口方向不确认就直接上判别式。记住口诀，先看开口，再看判别式。"
+    },
+    {
+      "index": 14,
+      "sceneId": "s14",
+      "file": "audio/lines/line_14.wav",
+      "durationSec": 8.001,
+      "text": "做完对一下清单：条件是不是恒成立？端点开闭验过了吗？两秒检查，避免会而不对。"
+    },
+    {
+      "index": 15,
+      "sceneId": "s15",
+      "file": "audio/lines/line_15.wav",
+      "durationSec": 7.521,
+      "text": "以后怎么做？第一步，看到可导函数加上区间单调，马上反应：导数恒定号。"
+    },
+    {
+      "index": 16,
+      "sceneId": "s16",
+      "file": "audio/lines/line_16.wav",
+      "durationSec": 8.461,
+      "text": "第二步，翻译成恒成立。含参二次就上判别式，能分离参数就分离参数。"
+    },
+    {
+      "index": 17,
+      "sceneId": "s17",
+      "file": "audio/lines/line_17.wav",
+      "durationSec": 8.601,
+      "text": "第三步，解完回验端点开闭。记住这套三步流程，这类题就是送分题。"
+    }
+  ]
+}
