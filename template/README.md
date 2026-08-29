@@ -191,3 +191,16 @@ python scripts/qa_glm.py
 - **语速恒 1.0**：`audio_meta.rate = 1.0`、`gen_tts_template.py` 同值钉死；时间轴公式不做任何变速补偿。
 - `package.json` 脚本：`npm run studio`（`remotion studio --no-open`）、`npm run render:169` / `render:916`（preview 输出）、`npm test`（vitest run）。
 - 契约校验失败 = bundle 加载即 throw（`src/engine/data.ts`），渲染直接中止，不产废片。
+
+## 9. v0.2 变更记录（2026-08-30，tag template-v0.2）
+
+**渲染输出变更（唯一）：**
+- `src/acts/components/ProblemPanel.tsx` Line 组件：容器加 `flexWrap:"wrap"+rowGap:8`，math 段 span 加 `whiteSpace:"nowrap"+flexShrink:0`（KaTeX 原子化）——修复 math-dense 题面一行段数过多时 flex 挤压 KaTeX 导致的行内公式崩坏（分式拆行/基线下沉/元素骑跨，E2E R2 实证 2/3 题系统性触发）。golden 短行修前/修后逐像素零漂移（MD5 四方对拍一致）。commit `9f73682`。
+
+**已知限制（v0.3 排期兜底）：**
+- 单段超长 math（约 >50 个简单字符）在原子化下会整体横向溢出卡片（有界横溢，非挤压崩坏）；v0.3 方案=math span `maxWidth:100%`+overflow 兜底，或服务端契约做 formula 长度校验。当前由 QA 审帧拦截溢出帧兜底（几何溢出类 FAIL 会触发驳回重生成）。
+
+**QA 工具链同步更新（渲染输出零变化，Ruling-15 定性=QA 工具可修）：**
+- `scripts/pick_frames.mjs`：章节标题采样帧 +34（CHAPTER_REVEAL_F，避开扫入动画中段假阴性，commit `b0c470c`）。
+- `scripts/qa_stills.mjs`（新增，commit `a22dad6`）：单进程 bundle 一次逐帧 renderStill，替代逐帧 `npx remotion still`（各付 ~35s 冷启动）；29 帧 59-70s。
+- `scripts/qa_glm.py`：审帧并发化（ThreadPoolExecutor，默认 4，`QA_GLM_CONCURRENCY` 可调，commit `a234a18`）+ 逐帧错误归因落盘（`ERROR <frame>\t<摘要>` 行，commit `2d39d6a`）。判定语义/FAIL 标准/report 格式/exit 语义零变化。
