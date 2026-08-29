@@ -3,9 +3,12 @@
 qa_glm.py — GLM-5.3-flash 客观审帧（重叠/乱码/黑字/越界/公式崩坏，不审审美）
 用法: python scripts/qa_glm.py [png ...]   （缺省审 out/qa/ 全部 png）
 Key: ZHIPU_API_KEY / ZHIPUAI_API_KEY / GLM_API_KEY 环境变量，回落 ~/.claude/settings.json 的 env.ANTHROPIC_AUTH_TOKEN
+并发: ThreadPoolExecutor 并发审帧，QA_GLM_CONCURRENCY 可调（默认 4）；prompt/FAIL 标准/report 格式/exit 语义与串行版一致，
+      report.md 仍按帧序输出（结果收集后按序写），每帧独立重试退避、429/超时按帧隔离（单帧最终失败 → 汇总 exit 1）。
 输出: out/qa/report.md；任一 FAIL → exit 1
 """
 import base64, json, mimetypes, os, pathlib, sys, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 API_URL = "https://open.bigmodel.cn/api/anthropic/v1/messages"  # Anthropic 兼容端点
@@ -30,6 +33,12 @@ def load_key():
         if tok:
             return tok.strip()
     sys.exit("[fatal] 未找到 GLM Key")
+
+def concurrency():
+    try:
+        return max(1, int(os.environ.get("QA_GLM_CONCURRENCY", "4").strip()))
+    except ValueError:
+        return 4
 
 def check(key, path):
     mime = mimetypes.guess_type(str(path))[0] or "image/png"
@@ -57,6 +66,12 @@ def check(key, path):
             time.sleep(5)
     return "[error] 重试耗尽", False
 
+def audit(key, indexed):
+    i, p = indexed
+    text, ok = check(key, p)
+    time.sleep(2)  # 帧间节流（串行版语义保留：每 worker 出帧后停 2s，整体速率 ≈ 并发度/2s）
+    return i, p, text, ok
+
 def main():
     key = load_key()
     root = pathlib.Path(__file__).resolve().parent.parent
@@ -64,14 +79,17 @@ def main():
     targets = [t for t in targets if t.suffix == ".png" and t.name != "scaffold.png"]
     if not targets:
         sys.exit("[fatal] 没有待审帧")
-    fails, lines = [], [f"# GLM 审帧报告 — {MODEL}\n"]
-    for p in targets:
-        text, ok = check(key, p)
-        print(f"[{'PASS' if ok else 'FAIL'}] {p.name}")
+    fails, lines, done = [], [f"# GLM 审帧报告 — {MODEL}\n"], {}
+    with ThreadPoolExecutor(max_workers=concurrency()) as pool:
+        futures = [pool.submit(audit, key, item) for item in enumerate(targets)]
+        for fut in as_completed(futures):
+            i, p, text, ok = fut.result()
+            done[i] = (p, text, ok)
+            print(f"[{'PASS' if ok else 'FAIL'}] {p.name}")
+    for p, text, ok in (done[i] for i in range(len(targets))):  # report.md 按帧序写
         lines.append(f"## {p.name}\n\n{text}\n")
         if not ok:
             fails.append(p.name)
-        time.sleep(2)
     out = root/"out"/"qa"/"report.md"
     if out.exists():
         out.replace(out.with_name("report_prev.md"))  # 写前备份上一轮报告
