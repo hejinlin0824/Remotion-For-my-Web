@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
@@ -360,6 +361,17 @@ class JobsControllerTest {
                 .andExpect(jsonPath("$.error").isNotEmpty());
     }
 
+    @Test
+    @DisplayName("video 非 DONE（T12 F5）：service 404 成片未定版 → 404 {error} 契约形状不变")
+    void video_notDone_mapsTo404ErrorShape() throws Exception {
+        when(service.videoPath("j1"))
+                .thenThrow(new GlobalExceptionHandler.ApiException(404, "成片未定版：任务 RENDERING 未达 DONE"));
+
+        mockMvc.perform(get("/api/v1/jobs/j1/video"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("成片未定版：任务 RENDERING 未达 DONE"));
+    }
+
     // ---------------------------------------------------------------- 兜底异常
 
     @Test
@@ -526,10 +538,11 @@ class JobsControllerTest {
         }
 
         @Test
-        @DisplayName("videoPath：final.mp4 存在 → 路径；不存在 → empty")
-        void videoPath_checksFileExistence(@TempDir Path tempDir) throws Exception {
+        @DisplayName("videoPath DONE：final.mp4 存在 → 路径；不存在 → empty")
+        void videoPath_done_checksFileExistence(@TempDir Path tempDir) throws Exception {
             Job job = new Job();
             job.setInputType("TEXT");
+            job.setStatus(JobStatus.DONE);
             job.setArtifactsDir(tempDir.toString());
             when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
 
@@ -537,6 +550,22 @@ class JobsControllerTest {
 
             Files.write(tempDir.resolve("final.mp4"), new byte[] {9});
             assertThat(realService.videoPath(job.getId())).contains(tempDir.resolve("final.mp4"));
+        }
+
+        @Test
+        @DisplayName("videoPath 非 DONE（T12 F5）：RENDERING 中即使旧 final.mp4 在盘也 404 成片未定版")
+        void videoPath_notDone_throws404EvenIfStaleFileExists(@TempDir Path tempDir) throws Exception {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            job.setStatus(JobStatus.RENDERING);
+            job.setArtifactsDir(tempDir.toString());
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+            Files.write(tempDir.resolve("final.mp4"), new byte[] {9});   // QA/重渲期间的在盘旧片
+
+            assertThatThrownBy(() -> realService.videoPath(job.getId()))
+                    .isInstanceOf(GlobalExceptionHandler.ApiException.class)
+                    .hasMessageContaining("成片未定版")
+                    .hasFieldOrPropertyWithValue("status", 404);
         }
     }
 

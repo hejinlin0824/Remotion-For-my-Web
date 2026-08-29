@@ -94,9 +94,17 @@ public class JobService {
         };
     }
 
-    /** 成片定位：任务存在且 artifacts/{id}/final.mp4 已落盘才返回路径，否则 empty（未就绪 404）。 */
+    /**
+     * 成片定位（T12 F5 门禁）：仅 status==DONE 放行——QA/重渲期间 artifacts 里的 final.mp4 是
+     * 上轮待重判的旧片（T12 实证 job1 在 QA 中返回了第一轮被弃成片），非 DONE 一律
+     * 404「成片未定版」（GlobalExceptionHandler 既有 {error} 契约）。
+     * DONE 且 artifacts/{id}/final.mp4 已落盘才返回路径；任务不存在或文件缺失 → empty（404 video 未就绪）。
+     */
     public Optional<Path> videoPath(String id) {
         return repo.findById(id).flatMap(job -> {
+            if (job.getStatus() != JobStatus.DONE) {
+                throw new GlobalExceptionHandler.ApiException(404, "成片未定版：任务 " + job.getStatus() + " 未达 DONE");
+            }
             String dir = job.getArtifactsDir() != null
                     ? job.getArtifactsDir()
                     : props.getArtifactsDir() + "/" + job.getId();
