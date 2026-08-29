@@ -199,7 +199,81 @@ class V1StructuralTest {
         assertThat(errorsOf(bad)).anyMatch(e -> e.startsWith("V1/popupFormula:") && e.contains("s06"));
     }
 
+    @Test
+    @DisplayName("规则9：散文字段注入 LaTeX（\\命令、^{、_{）→ V1/散文LaTeX 逐字段报路径")
+    void proseFieldsRejectLatex() throws Exception {
+        var bad = mutate(root -> {
+            problemTextSegment(root, 0, 0).put("value", "已知函数 \\frac{a}{b} ");
+            knowledge(root, 2).put("claim", "分离参数后要求 g(x)_{\\max} 可求");
+            knowledge(root, 1).put("premise", "判别式 \\frac{b}{2} 需先确认符号");
+            step(root, 0).put("statement", "对 f(x)=x^{3}+ax^{2}+x 逐项求导");
+            step(root, 1).put("note", "判别式 \\Delta\\le 0 时取等");
+            pitfall(root, 0).put("why", "漏掉 \\sqrt{3} 两个端点");
+            pitfall(root, 1).put("claim", "直接开方 x_{1} 只写正支");
+            methodItem(root, 0).put("step", "识别单调 \\iff 导数定号");
+            methodItem(root, 1).put("trick", "上判别式 \\Delta");
+            scene(root, 0).put("ttsText", "求出 \\sqrt{3} 的取值范围");
+        });
+
+        var errors = errorsOf(bad);
+        assertThat(errors).anyMatch(e -> e.startsWith("V1/散文LaTeX:")
+                && e.contains("problem.lines[0].segments[0].value"));
+        assertThat(errors).anyMatch(e -> e.startsWith("V1/散文LaTeX:") && e.contains("knowledge[2].claim"));
+        assertThat(errors).anyMatch(e -> e.startsWith("V1/散文LaTeX:") && e.contains("knowledge[1].premise"));
+        assertThat(errors).anyMatch(e -> e.startsWith("V1/散文LaTeX:") && e.contains("steps[0].statement")
+                && e.contains("^{"));
+        assertThat(errors).anyMatch(e -> e.startsWith("V1/散文LaTeX:") && e.contains("steps[1].note"));
+        assertThat(errors).anyMatch(e -> e.startsWith("V1/散文LaTeX:") && e.contains("pitfalls[0].why"));
+        assertThat(errors).anyMatch(e -> e.startsWith("V1/散文LaTeX:") && e.contains("pitfalls[1].claim"));
+        assertThat(errors).anyMatch(e -> e.startsWith("V1/散文LaTeX:") && e.contains("generalMethod[0].step"));
+        assertThat(errors).anyMatch(e -> e.startsWith("V1/散文LaTeX:") && e.contains("generalMethod[1].trick"));
+        assertThat(errors).anyMatch(e -> e.startsWith("V1/散文LaTeX:") && e.contains("scenes[0].ttsText"));
+    }
+
+    @Test
+    @DisplayName("规则9放行：Unicode 简易数学（±√≤≥⇔、f'(x)>0、a²）不算 LaTeX")
+    void unicodeMathInProsePasses() throws Exception {
+        var fine = mutate(root -> {
+            problemTextSegment(root, 0, 0).put("value", "已知函数 f(x)（参数 a≥0） ");
+            knowledge(root, 0).put("claim", "导数恒 ≥0 ⇔ 单调递增（a² 系数为正）");
+            knowledge(root, 1).put("premise", "二次项系数 |a|≤√3 时仍需先看符号");
+            step(root, 0).put("statement", "对 f(x) 求导，x² 项系数为 3");
+            step(root, 1).put("note", "a²≤3 等价于 |a|≤√3");
+            pitfall(root, 0).put("why", "漏掉 a=±√3 两个端点");
+            pitfall(root, 1).put("claim", "把条件写成 f'(x)>0 严格大于");
+            methodItem(root, 0).put("step", "识别：可导函数 + 区间单调（⇔ 导数定号）");
+            methodItem(root, 1).put("trick", "能分离参数就分离 → 判别式 ≤ 0");
+            scene(root, 0).put("ttsText", "3x 方加 2ax 加 1，判别式 ≤ 0，a=±√3");
+        });
+
+        var result = validator.validate(ctx(fine));
+
+        assertThat(result.pass()).as("Unicode 简易数学不应误伤，实际错误：%s", result.errors()).isTrue();
+        assertThat(result.errors()).noneMatch(e -> e.startsWith("V1/散文LaTeX:"));
+    }
+
     // ---- helpers ----
+
+    private static ObjectNode knowledge(ObjectNode root, int index) {
+        return (ObjectNode) root.get("knowledge").get(index);
+    }
+
+    private static ObjectNode step(ObjectNode root, int index) {
+        return (ObjectNode) root.get("steps").get(index);
+    }
+
+    private static ObjectNode pitfall(ObjectNode root, int index) {
+        return (ObjectNode) root.get("pitfalls").get(index);
+    }
+
+    private static ObjectNode methodItem(ObjectNode root, int index) {
+        return (ObjectNode) root.get("generalMethod").get(index);
+    }
+
+    /** 题干某行某段的段节点（type="text" 的散文字段）。 */
+    private static ObjectNode problemTextSegment(ObjectNode root, int line, int segment) {
+        return (ObjectNode) root.get("problem").get("lines").get(line).get("segments").get(segment);
+    }
 
     private ContentJson loadGolden() throws Exception {
         return MAPPER.readValue(goldenFile.toFile(), ContentJson.class);

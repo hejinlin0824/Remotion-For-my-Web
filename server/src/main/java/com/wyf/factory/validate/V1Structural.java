@@ -1,6 +1,7 @@
 package com.wyf.factory.validate;
 
 import com.wyf.factory.content.ContentJson;
+import com.wyf.factory.stations.Material;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -8,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * V1 结构校验：引擎 template/src/engine/contract.ts 的 Java 超集
@@ -15,7 +17,8 @@ import java.util.Set;
  * problem-card 唯一首场）+ 条数硬校验 + 终审 §7 结构规则包。
  *
  * <p>每条规则一个私有方法，错误消息格式 {@code "V1/<规则名>: <具体差异>"}，
- * 供 T10 编排器回传 LLM 修正。audio_meta 一致性归 T8，此处不查。</p>
+ * 供 T10 编排器回传 LLM 修正。audio_meta 一致性归 T8，此处不查。
+ * 另含散文字段 LaTeX 禁令（T11 冒烟实证：裸 LaTeX 写进 statement 会被模板按纯文本渲染）。</p>
  */
 @Component
 public class V1Structural implements Validator {
@@ -28,6 +31,13 @@ public class V1Structural implements Validator {
             2, Set.of("problem-card", "knowledge-card"),
             3, Set.of("step-card", "derivation-popup", "pitfall-card", "checklist-card"),
             4, Set.of("general-list"));
+
+    /**
+     * 散文里的 LaTeX 标记：反斜杠命令序列（\le、\frac、\sqrt…）或 ^{、_{ 上下标。
+     * 散文字段 = 纯中文叙述 + Unicode 简易符号（±√≤≥⇔）；T11 冒烟实证 GLM 会把
+     * 裸 LaTeX 写进散文（"对 f(x)=x^{3}+ax^{2}+x 逐项求导"），模板按纯文本渲染成乱码。
+     */
+    private static final Pattern LATEX_IN_PROSE = Pattern.compile("\\\\[a-zA-Z]+|\\^\\{|_\\{");
 
     @Override
     public ValidationResult validate(ValidationContext ctx) {
@@ -47,6 +57,7 @@ public class V1Structural implements Validator {
         checkStepRefSequence(scenes, content, errors);
         checkChecklistUnique(scenes, errors);
         checkItemRefSequence(scenes, content, errors);
+        checkProseNoLatex(content, errors);
 
         return errors.isEmpty() ? ValidationResult.ok() : ValidationResult.fail(errors);
     }
@@ -234,7 +245,78 @@ public class V1Structural implements Validator {
         }
     }
 
+    // ---- 规则9：散文字段 LaTeX 禁令（LaTeX 只允许 math 段 / steps.derivation / knowledge.formula / popup formula） ----
+    private static void checkProseNoLatex(ContentJson content, List<String> errors) {
+        List<ContentJson.Line> lines = content.problem() == null || content.problem().lines() == null
+                ? List.of() : content.problem().lines();
+        for (int i = 0; i < lines.size(); i++) {
+            List<ContentJson.Seg> segments = lines.get(i).segments() == null
+                    ? List.of() : lines.get(i).segments();
+            for (int j = 0; j < segments.size(); j++) {
+                ContentJson.Seg seg = segments.get(j);
+                if ("text".equals(seg.type())) {
+                    checkProse("problem.lines[%d].segments[%d].value".formatted(i, j), seg.value(), errors);
+                }
+            }
+        }
+        List<Material.Knowledge> knowledge = content.knowledge() == null ? List.of() : content.knowledge();
+        for (int i = 0; i < knowledge.size(); i++) {
+            Material.Knowledge item = knowledge.get(i);
+            checkProse("knowledge[%d].claim".formatted(i), item.claim(), errors);
+            checkProse("knowledge[%d].premise".formatted(i), item.premise(), errors);
+            checkProse("knowledge[%d].trap".formatted(i), item.trap(), errors);
+        }
+        List<Material.Step> steps = content.steps() == null ? List.of() : content.steps();
+        for (int i = 0; i < steps.size(); i++) {
+            Material.Step step = steps.get(i);
+            checkProse("steps[%d].statement".formatted(i), step.statement(), errors);
+            checkProse("steps[%d].note".formatted(i), step.note(), errors);
+        }
+        List<Material.Pitfall> pitfalls = content.pitfalls() == null ? List.of() : content.pitfalls();
+        for (int i = 0; i < pitfalls.size(); i++) {
+            Material.Pitfall pitfall = pitfalls.get(i);
+            checkProse("pitfalls[%d].claim".formatted(i), pitfall.claim(), errors);
+            checkProse("pitfalls[%d].why".formatted(i), pitfall.why(), errors);
+        }
+        List<Material.MethodItem> generalMethod = content.generalMethod() == null
+                ? List.of() : content.generalMethod();
+        for (int i = 0; i < generalMethod.size(); i++) {
+            Material.MethodItem item = generalMethod.get(i);
+            checkProse("generalMethod[%d].step".formatted(i), item.step(), errors);
+            checkProse("generalMethod[%d].trick".formatted(i), item.trick(), errors);
+        }
+        for (int i = 0; i < scenes(content).size(); i++) {
+            ContentJson.Scene scene = scenes(content).get(i);
+            checkProse("scenes[%d].ttsText".formatted(i), scene.ttsText(), errors);
+            Map<String, Object> sceneProps = scene.props() == null ? Map.of() : scene.props();
+            for (Map.Entry<String, Object> entry : sceneProps.entrySet()) {
+                if ("formula".equals(entry.getKey())) {
+                    continue; // derivation-popup 的 KaTeX 公式，属合法 LaTeX 字段
+                }
+                if (entry.getValue() instanceof String value) {
+                    checkProse("scenes[%d].props.%s".formatted(i, entry.getKey()), value, errors);
+                }
+            }
+        }
+    }
+
+    private static void checkProse(String path, String value, List<String> errors) {
+        if (value == null) {
+            return;
+        }
+        var marker = LATEX_IN_PROSE.matcher(value);
+        if (marker.find()) {
+            errors.add("V1/散文LaTeX: %s 含 LaTeX 标记「%s」，散文字段只允许中文/Unicode 简易符号，"
+                    .formatted(path, marker.group())
+                    + "公式只可进 derivation、knowledge.formula 或 math 段");
+        }
+    }
+
     // ---- helpers ----
+
+    private static List<ContentJson.Scene> scenes(ContentJson content) {
+        return content.scenes() == null ? List.of() : content.scenes();
+    }
 
     private static List<Long> fullRange(int size) {
         List<Long> range = new ArrayList<>();

@@ -31,6 +31,12 @@ public final class Prompts {
 
             条数硬性范围：knowledge 2-4 条 / steps 3-10 条 / pitfalls 1-3 条 / generalMethod 3-6 条。
 
+            字段约定（散文字段禁 LaTeX，违反会被驳回重写）：
+            - 散文字段 = knowledge 的 claim/premise/trap、steps 的 statement/note、pitfalls 的 claim/why、generalMethod 的 step/trick：只写纯中文叙述，简易数学用 Unicode 符号（± √ ≤ ≥ ⇔ →），禁止任何 LaTeX 源码（\\frac、\\sqrt、\\ge 等反斜杠命令，以及 ^{…}、_{…} 上/下标写法）
+            - LaTeX 只允许写进 formula（knowledge）与 derivation（steps）两个字段
+            - 反例（禁止，模板会把 LaTeX 源码原样显示）："statement": "对 f(x)=x^{3}+ax^{2}+x 逐项求导"；"trap": "判别式 \\Delta\\le 0"
+            - 正例："statement": "对 f(x) 逐项求导，三次项降为二次"；"trap": "写成 f'(x)>0 会漏掉临界情形（本题 a=±√3）"
+
             knowledge（知识点回顾，本题为哪几个考点服务）：每条 {"claim","formula","premise","trap"}
             - claim：一句话知识点断言（中文）
             - formula：配套公式，KaTeX 源码（不用 $ 定界符）
@@ -141,6 +147,12 @@ public final class Prompts {
             - meta.aspect 固定 "16:9"；meta.problemType 照抄输入题目的 problemType
             - problem：必须逐字复用输入题目的 lines，一字不改（id 与 segments 全部原样）
             - knowledge/steps/pitfalls/generalMethod：基于输入素材组织，字段结构不变；条数硬性范围 knowledge 2-4 / steps 3-10 / pitfalls 1-3 / generalMethod 3-6
+
+            字段约定（散文字段禁 LaTeX，违反会被驳回重写）：
+            - 散文字段 = 四段素材里的 claim/premise/trap、statement/note、claim/why、step/trick，加上每场 ttsText 与 problem 中 type="text" 的段：只写纯中文叙述，简易数学用 Unicode 符号（± √ ≤ ≥ ⇔ →），禁止任何 LaTeX 源码（\\frac、\\sqrt、\\ge 等反斜杠命令，以及 ^{…}、_{…} 上/下标写法）
+            - LaTeX 只允许出现在：steps 的 derivation、knowledge 的 formula、derivation-popup 的 props.formula、problem 中 type="math" 的段
+            - 反例（禁止，模板会把 LaTeX 源码原样显示）："statement": "对 f(x)=x^{3}+ax^{2}+x 逐项求导"
+            - 正例："statement": "对 f(x) 逐项求导，三次项降为二次"，公式写进 derivation："f'(x)=3x^{2}+2ax+1"
 
             scenes 规则（必须全部满足；scenes 顺序 = 播放顺序，必须 act2 全部 → act3 全部 → act4 全部）：
             - 每场 {"id":"s01" 起两位递增,"act":2|3|4,"component":...,"ttsText":...,"props":{...}}
