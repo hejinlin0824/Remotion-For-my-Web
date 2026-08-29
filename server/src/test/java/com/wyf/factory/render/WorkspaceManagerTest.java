@@ -103,7 +103,7 @@ class WorkspaceManagerTest {
     @Test
     @DisplayName("复制+排除：普通文件照搬；out/node_modules/data/.git 不入副本")
     void copiesTemplate_excludesOutNodeModulesDataGit() throws Exception {
-        Path ws = manager().create(7L, content, meta, lineWavs());
+        Path ws = manager().create("7", content, meta, lineWavs());
 
         assertThat(ws).isEqualTo(workspaceDir.resolve("7")).exists();
         assertThat(ws.resolve("package.json")).exists();
@@ -119,7 +119,7 @@ class WorkspaceManagerTest {
     @Test
     @DisplayName("覆写三处：content.json=toJson 原文；audio_meta.json=writeTo 等值；旧 STALE 值不残留")
     void overwritesThreePlaces() throws Exception {
-        Path ws = manager().create(7L, content, meta, lineWavs());
+        Path ws = manager().create("7", content, meta, lineWavs());
 
         String writtenContent = Files.readString(ws.resolve("src/data/content.json"), StandardCharsets.UTF_8);
         String writtenMeta = Files.readString(ws.resolve("src/data/audio_meta.json"), StandardCharsets.UTF_8);
@@ -130,7 +130,7 @@ class WorkspaceManagerTest {
     @Test
     @DisplayName("junction 命令：cmd /c mklink /J 两端均为绝对路径（副本 node_modules → 模板 node_modules）")
     void junctionCommand_absolutePaths() throws Exception {
-        manager().create(7L, content, meta, lineWavs());
+        manager().create("7", content, meta, lineWavs());
 
         assertThat(runner.calls).hasSize(1);
         FakeRunner.Call call = runner.calls.get(0);
@@ -145,7 +145,7 @@ class WorkspaceManagerTest {
     void mklinkFailure_throwsIllegalState() throws Exception {
         runner.onMklink(call -> new ProcessResult(1, "", "拒绝访问。", false));
 
-        assertThatThrownBy(() -> manager().create(7L, content, meta, lineWavs()))
+        assertThatThrownBy(() -> manager().create("7", content, meta, lineWavs()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("mklink");
     }
@@ -154,7 +154,7 @@ class WorkspaceManagerTest {
     @DisplayName("已存在工作区重建：先 rmdir 拆 junction（此刻旧树仍在），再删树，再重新 mklink")
     void recreate_rmdirBeforeTreeDeleteBeforeMklink() throws Exception {
         WorkspaceManager mgr = manager();
-        Path ws = mgr.create(7L, content, meta, lineWavs());
+        Path ws = mgr.create("7", content, meta, lineWavs());
         assertThat(ws.resolve("node_modules")).exists(); // fake mklink 已造出 junction 位置
         runner.calls.clear();
         List<String> observedAtRmdir = new ArrayList<>();
@@ -169,7 +169,7 @@ class WorkspaceManagerTest {
             return new ProcessResult(0, "", "", false);
         });
 
-        mgr.create(7L, content, meta, lineWavs());
+        mgr.create("7", content, meta, lineWavs());
 
         assertThat(observedAtRmdir).containsExactly("tree-present");
         assertThat(runner.calls).hasSize(2);
@@ -181,7 +181,7 @@ class WorkspaceManagerTest {
     @Test
     @DisplayName("line_NN 命名与清空：模板旧 line_01..03 全清，按 1 起 NN 写入新 wav")
     void lineWavs_clearedThenWritten() throws Exception {
-        Path ws = manager().create(7L, content, meta, lineWavs());
+        Path ws = manager().create("7", content, meta, lineWavs());
 
         Path lines = ws.resolve("public/audio/lines");
         try (Stream<Path> files = Files.list(lines)) {
@@ -196,17 +196,17 @@ class WorkspaceManagerTest {
     @DisplayName("cleanup：junction rmdir 在删树之前；树删净；工作区不存在则幂等无命令")
     void cleanup_rmdirThenDeleteTree_idempotent() throws Exception {
         WorkspaceManager mgr = manager();
-        Path ws = mgr.create(7L, content, meta, lineWavs());
+        Path ws = mgr.create("7", content, meta, lineWavs());
         runner.calls.clear();
 
-        mgr.cleanup(7L);
+        mgr.cleanup("7");
         assertThat(ws).doesNotExist();
         assertThat(runner.calls).hasSize(1);
         assertThat(runner.calls.get(0).command()).containsExactly("cmd", "/c", "rmdir",
                 ws.resolve("node_modules").toAbsolutePath().normalize().toString());
 
         runner.calls.clear();
-        mgr.cleanup(7L); // 幂等：不存在 → 无命令不抛
+        mgr.cleanup("7"); // 幂等：不存在 → 无命令不抛
         assertThat(runner.calls).isEmpty();
     }
 
@@ -214,14 +214,30 @@ class WorkspaceManagerTest {
     @DisplayName("rmdir 失败即中止：抛 IllegalStateException 且绝不删树（sim-001 防御）")
     void cleanup_rmdirFailure_abortsTreeDelete() throws Exception {
         WorkspaceManager mgr = manager();
-        Path ws = mgr.create(7L, content, meta, lineWavs());
+        Path ws = mgr.create("7", content, meta, lineWavs());
         runner.onRmdir(call -> new ProcessResult(1, "", "目录不是空的。", false));
 
-        assertThatThrownBy(() -> mgr.cleanup(7L))
+        assertThatThrownBy(() -> mgr.cleanup("7"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("中止");
         assertThat(ws).exists(); // 树未动
         assertThat(ws.resolve("src/engine/engine.ts")).exists();
+    }
+
+    @Test
+    @DisplayName("删树守卫先行：遇到 node_modules 即中止，其内容必须先于守卫存活（T9 评审 M 项）")
+    void deleteTree_guardFiresBeforeDeletingJunctionContents() throws Exception {
+        Path ws = workspaceDir.resolve("guard-ws");
+        write(ws, "src/engine/engine.ts", "export const FPS = 30;");
+        write(ws, "node_modules/react/index.js", "TEMPLATE-KEEPER");
+        write(ws, "node_modules/react/package.json", "{\"name\":\"react\"}");
+
+        assertThatThrownBy(() -> WorkspaceManager.deleteTree(ws))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("中止");
+        // 守卫必须在实际删除任何 node_modules 内容之前生效（逆序遍历会先删 junction 子孙再抛——即删伤模板本体）
+        assertThat(ws.resolve("node_modules/react/index.js")).exists();
+        assertThat(ws.resolve("node_modules/react/package.json")).exists();
     }
 
     @Test
@@ -232,13 +248,13 @@ class WorkspaceManagerTest {
         JdkProcessRunner real = new JdkProcessRunner();
         WorkspaceManager mgr = new WorkspaceManager(real, props());
 
-        Path ws = mgr.create(8L, content, meta, lineWavs());
+        Path ws = mgr.create("8", content, meta, lineWavs());
         assertThat(ws.resolve("node_modules/keeper.txt")).hasContent("KEEP-ME"); // 穿读 junction
         // 已存在工作区再重建一次：真 rmdir 真删树真重挂
-        mgr.create(8L, content, meta, lineWavs());
+        mgr.create("8", content, meta, lineWavs());
         assertThat(ws.resolve("node_modules/keeper.txt")).hasContent("KEEP-ME");
 
-        mgr.cleanup(8L);
+        mgr.cleanup("8");
         assertThat(ws).doesNotExist();
         assertThat(templateDir.resolve("node_modules/keeper.txt")).hasContent("KEEP-ME"); // 本体无伤
     }

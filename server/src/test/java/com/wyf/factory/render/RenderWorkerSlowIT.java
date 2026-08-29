@@ -27,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class RenderWorkerSlowIT {
 
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final long JOB_ID = 9901L;
+    private static final String JOB_ID = "slow-9901";
 
     @TempDir
     Path tempDir;
@@ -51,25 +51,22 @@ class RenderWorkerSlowIT {
         RenderWorker renderWorker = new RenderWorker(new JdkProcessRunner(), props);
 
         Path ws = workspaceManager.create(JOB_ID, content, meta, lineWavs);
-        Path mp4 = null;
         try {
             assertThat(ws.resolve("node_modules"))
                     .as("junction 可穿读模板依赖").isDirectory();
             assertThat(ws.resolve("node_modules/@remotion")).isDirectory();
 
-            mp4 = renderWorker.render(ws, "0-30");
+            Path mp4 = renderWorker.render(ws, "0-30");
 
             assertThat(mp4).isRegularFile();
             assertThat(Files.size(mp4)).isGreaterThan(100_000);
         } finally {
-            if (mp4 != null) {
-                workspaceManager.cleanup(JOB_ID);
-            }
+            // 无条件 cleanup（T9 评审 M 项）：mklink 成功后任何异常路径都必须拆 junction，
+            // 否则 @TempDir 递归清理可能穿 junction 伤 template 本体
+            workspaceManager.cleanup(JOB_ID);
         }
-        if (mp4 != null) {
-            assertThat(ws).doesNotExist(); // cleanup 只拆 link 不删树后的正常收尾
-            assertThat(template.resolve("node_modules/@remotion")).isDirectory(); // 模板本体无伤
-        }
+        assertThat(ws).doesNotExist(); // cleanup 只拆 link 不删树后的正常收尾
+        assertThat(template.resolve("node_modules/@remotion")).isDirectory(); // 模板本体无伤
     }
 
     /** golden 台词 wav 照抄（键=lines 序，1 起）。 */

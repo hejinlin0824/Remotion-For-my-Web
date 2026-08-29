@@ -15,6 +15,8 @@ public class AppProperties {
     private String workspaceDir = "../workspace";
     /** 成片与 QA 产物目录（保留） */
     private String artifactsDir = "../artifacts";
+    /** 对外基地址（DONE 回调 videoUrl 前缀；反代/域名部署时在 secrets.local.yml 覆盖） */
+    private String publicBaseUrl = "http://localhost:8080";
 
     private final Render render = new Render();
     private final Glm glm = new Glm();
@@ -91,6 +93,8 @@ public class AppProperties {
     public void setWorkspaceDir(String workspaceDir) { this.workspaceDir = workspaceDir; }
     public String getArtifactsDir() { return artifactsDir; }
     public void setArtifactsDir(String artifactsDir) { this.artifactsDir = artifactsDir; }
+    public String getPublicBaseUrl() { return publicBaseUrl; }
+    public void setPublicBaseUrl(String publicBaseUrl) { this.publicBaseUrl = publicBaseUrl; }
     public Render getRender() { return render; }
     public Glm getGlm() { return glm; }
     public Tts getTts() { return tts; }

@@ -8,8 +8,10 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.List;
@@ -48,8 +50,11 @@ public class WorkspaceManager {
     /**
      * 建工作区：已存在则先整删（含 junction 拆除）再重建。lineWavs 键从 1 起
      * （=scenes 数组序），写 line_%02d.wav。
+     *
+     * <p>jobId 为 String：Job.id 是 UUID（T2），工作区目录名 = jobId，
+     * 断点续跑协议（T10）按 {@code workspace/{jobId}/...} 找产物。</p>
      */
-    public Path create(long jobId, ContentJson content, AudioMeta meta, Map<Integer, byte[]> lineWavs)
+    public Path create(String jobId, ContentJson content, AudioMeta meta, Map<Integer, byte[]> lineWavs)
             throws InterruptedException {
         Path ws = workspacePath(jobId);
         if (Files.exists(ws)) {
@@ -69,15 +74,15 @@ public class WorkspaceManager {
     }
 
     /** 任务工作区目录：{workspaceDir}/{jobId}。 */
-    public Path workspacePath(long jobId) {
-        return workspaceRoot().resolve(String.valueOf(jobId));
+    public Path workspacePath(String jobId) {
+        return workspaceRoot().resolve(jobId);
     }
 
     /**
      * 整删工作区。顺序硬性：junction 存在则先 {@code cmd /c rmdir}（只拆链接不删目标），
      * 失败/拆后仍在 → 抛 IllegalStateException 中止；随后才递归删树。
      */
-    public void cleanup(long jobId) throws InterruptedException {
+    public void cleanup(String jobId) throws InterruptedException {
         Path ws = workspacePath(jobId);
         if (!Files.exists(ws)) {
             return;
@@ -169,17 +174,40 @@ public class WorkspaceManager {
         }
     }
 
-    /** 删树（junction 已确认拆除后才可能到这里）；途中再遇 node_modules 即抛（纯保险）。 */
-    private static void deleteTree(Path ws) throws InterruptedException {
-        try (Stream<Path> paths = Files.walk(ws)) {
-            // 逆序 = 子先于父（Path 比较父为前缀必小于子）
-            for (Path p : paths.sorted(java.util.Comparator.reverseOrder()).toList()) {
-                if ("node_modules".equals(p.getFileName().toString())) {
-                    throw new IllegalStateException("删树途中出现 node_modules（junction 未拆净？），中止："
-                            + p);
+    /**
+     * 删树（junction 已确认拆除后才可能到这里）；途中再遇 node_modules 即抛（纯保险）。
+     * 守卫必须先于删除生效：walkFileTree 的 preVisitDirectory 在进入目录前判定，
+     * 命中 node_modules 立即中止——绝不能像逆序遍历那样先删掉 junction 的子孙
+     * （= template/node_modules 本体内容）才轮到 junction 条目抛（T9 评审 M 项）。
+     */
+    static void deleteTree(Path ws) {
+        try {
+            Files.walkFileTree(ws, new java.nio.file.SimpleFileVisitor<Path>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                    if ("node_modules".equals(dir.getFileName().toString())) {
+                        throw new IllegalStateException("删树途中出现 node_modules（junction 未拆净？），中止："
+                                + dir);
+                    }
+                    return FileVisitResult.CONTINUE;
                 }
-                Files.delete(p);
-            }
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                    if ("node_modules".equals(file.getFileName().toString())) {
+                        throw new IllegalStateException("删树途中出现 node_modules（junction 未拆净？），中止："
+                                + file);
+                    }
+                    Files.delete(file);
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                    Files.delete(dir);
+                    return FileVisitResult.CONTINUE;
+                }
+            });
         } catch (IOException e) {
             throw new UncheckedIOException("工作区删树失败：" + ws, e);
         }

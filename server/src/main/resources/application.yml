@@ -12,6 +12,7 @@ app:
   template-dir: ../template          # 相对 server/ 运行目录；绝对路径可在 secrets.local.yml 覆盖
   workspace-dir: ../workspace
   artifacts-dir: ../artifacts
+  public-base-url: http://localhost:8080   # DONE 回调 videoUrl 前缀，反代/域名部署时覆盖
   render:
     timeout-minutes: 30
     concurrency: 2

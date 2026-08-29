@@ -77,6 +77,15 @@ public class AudioMeta {
         }
     }
 
+    /** 从盘上读回（断点续跑：workspace/{jobId}/src/data/audio_meta.json），IO 失败包 UncheckedIOException。 */
+    public static AudioMeta readFrom(Path audioMetaJson) {
+        try {
+            return MAPPER.readValue(Files.readString(audioMetaJson, StandardCharsets.UTF_8), AudioMeta.class);
+        } catch (IOException e) {
+            throw new UncheckedIOException("audio_meta.json 读取失败：" + audioMetaJson, e);
+        }
+    }
+
     public String getVoice() { return voice; }
     public void setVoice(String voice) { this.voice = voice; }
     public String getModel() { return model; }

@@ -5,6 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wyf.factory.stations.Material;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -58,6 +62,15 @@ public record ContentJson(
             return MAPPER.writeValueAsString(this);
         } catch (IOException e) {
             throw new IllegalStateException("content.json 序列化失败", e);
+        }
+    }
+
+    /** 从盘上读回（断点续跑：workspace/{jobId}/src/data/content.json），IO 失败包 UncheckedIOException。 */
+    public static ContentJson readFrom(Path file) {
+        try {
+            return MAPPER.readValue(Files.readString(file, StandardCharsets.UTF_8), ContentJson.class);
+        } catch (IOException e) {
+            throw new UncheckedIOException("content.json 读取失败：" + file, e);
         }
     }
 }
