@@ -1,4 +1,4 @@
-import { Sequence, interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion";
+import { interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion";
 import { COLORS, EXIT_F } from "../../engine/constants";
 import type { MethodItem } from "../../engine/types";
 import { CardShell, Row } from "./CardShell";

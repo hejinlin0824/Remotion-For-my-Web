@@ -1,6 +1,5 @@
 import { COLORS, FONT_FAMILY } from "../../engine/constants";
 import katex from "katex";
-import { useMemo } from "react";
 import type { ContentJson, ProblemLine } from "../../engine/types";
 
 const inline = (tex: string) =>

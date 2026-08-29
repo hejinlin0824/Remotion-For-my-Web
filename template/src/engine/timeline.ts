@@ -1,4 +1,4 @@
-import { ACT5_TAIL_SEC, BREATH_SEC, CHAPTER_F, CHAPTER_TITLES, FPS } from "./constants";
+import { ACT5_TAIL_SEC, BREATH_SEC, CHAPTER_TITLES, FPS } from "./constants";
 import type { ActKey, AudioMeta, ComponentKey, ContentJson, SceneProps } from "./types";
 
 export interface ActWindow { act: 1 | 2 | 3 | 4 | 5; startFrame: number; durFrames: number }
