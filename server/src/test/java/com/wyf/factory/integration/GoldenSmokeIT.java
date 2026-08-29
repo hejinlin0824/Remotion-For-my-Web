@@ -190,6 +190,7 @@ class GoldenSmokeIT {
         List<String> enteredStages = history.stream()
                 .filter(h -> "ENTER".equals(h.state()))
                 .map(Hist::stage)
+                .filter(s -> !"QUEUED".equals(s))   // 生产在入队时也写 QUEUED ENTER（第 8 条历史，rerun3 实测）；brief 七阶段不含它
                 .distinct()
                 .toList();
         assertThat(enteredStages)
