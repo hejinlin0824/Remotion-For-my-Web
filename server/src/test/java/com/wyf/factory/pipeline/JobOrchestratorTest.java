@@ -60,8 +60,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * 编排器全链契约（全 mock，零真调，@Scheduled 直调 poll() 不起真调度）：
- * happy path 序列/调用顺序 / 驳回回传重试 / 驳回预算尽 / QA 回退重渲 / 审题判死 /
- * 断点续跑 / 取消检查点 / 领单 CAS 抢占 / 取消 TOCTOU 兜底。
+ * happy path 序列/调用顺序 / 驳回回传重试 / 驳回预算尽 / QA 判负回传重生成（Ruling-17）
+ * 与 QA 预算边界（F2-R2）/ 审题判死 / 断点续跑 / 取消检查点 / 领单 CAS 抢占 / 取消 TOCTOU 兜底。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -298,28 +298,97 @@ class JobOrchestratorTest {
         verify(ttsPipeline, never()).synthesizeAll(any(), any());
     }
 
-    // ---- 4. QA FAIL 回退重渲染 ----
+    // ---- 4. QA 判负 → 带 FAIL 清单回 GENERATING 重生成（Ruling-17 结构性主修） ----
 
     @Test
-    @DisplayName("QA 回退：FAIL 2 轮 → RENDERING 全片重渲 → 第 3 轮过 → DONE")
-    void qaFails_twoRounds_rerender_thenPass() throws Exception {
+    @DisplayName("Ruling-17：QA 判负 2 轮 → GENERATING 重生成且第 2/3 次生成参数携带 QA FAIL 清单 → 第 3 轮过 → DONE")
+    void qaFails_twoRounds_regeneratesWithFailList_thenPass() throws Exception {
         Job job = claimedJob();
         stubRepo(job);
         stubStationsOk();
         when(qaFrameCheck.check(any(Path.class)))
-                .thenReturn(new QaFrameCheck.QaResult(false, List.of("FAIL s03 帧 12 画面缺失"), 3))
-                .thenReturn(new QaFrameCheck.QaResult(false, List.of("FAIL s05 帧 40 花屏"), 3))
+                .thenReturn(new QaFrameCheck.QaResult(false, List.of("FAIL s03 帧 12 结论卡公式等号后折行"), 3))
+                .thenReturn(new QaFrameCheck.QaResult(false, List.of("FAIL s05 帧 40 卡片出缘"), 3))
                 .thenReturn(new QaFrameCheck.QaResult(true, List.of(), 3));
 
         orchestrator.process(JOB_ID);
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
         assertThat(job.getQaRounds()).isEqualTo(2);
-        verify(renderWorker, times(3)).render(any(Path.class));   // 每轮全片重渲
         verify(qaFrameCheck, times(3)).check(any(Path.class));
+        verify(renderWorker, times(3)).render(any(Path.class));      // 每轮全片渲染（重生成后自然重做）
+        verify(ttsPipeline, times(3)).synthesizeAll(any(), any());   // 剧本变了 → TTS 重做，不得复用旧音频
+
+        // 第 2/3 次素材与剧本生成的错误清单 = 上轮 QA FAIL 清单（与 V 驳回同一错误注入通道）
+        ArgumentCaptor<List<String>> materialErrors = ArgumentCaptor.forClass(List.class);
+        verify(materialStation, times(3)).generate(any(), materialErrors.capture());
+        assertThat(materialErrors.getAllValues()).hasSize(3);
+        assertThat(materialErrors.getAllValues().get(0)).isEmpty();
+        assertThat(materialErrors.getAllValues().get(1)).containsExactly("FAIL s03 帧 12 结论卡公式等号后折行");
+        assertThat(materialErrors.getAllValues().get(2)).containsExactly("FAIL s05 帧 40 卡片出缘");
+
+        ArgumentCaptor<List<String>> scriptErrors = ArgumentCaptor.forClass(List.class);
+        verify(scriptStation, times(3)).assemble(any(), any(), scriptErrors.capture());
+        assertThat(scriptErrors.getAllValues().get(0)).isEmpty();
+        assertThat(scriptErrors.getAllValues().get(1)).containsExactly("FAIL s03 帧 12 结论卡公式等号后折行");
+        assertThat(scriptErrors.getAllValues().get(2)).containsExactly("FAIL s05 帧 40 卡片出缘");
+
         assertThat(historyStages(job)).containsExactly(
-                "QUEUED", "EXTRACTING", "GENERATING", "REVIEWING", "SPEAKING",
-                "RENDERING", "QA", "RENDERING", "QA", "RENDERING", "QA", "DONE");
+                "QUEUED", "EXTRACTING",
+                "GENERATING", "REVIEWING", "SPEAKING", "RENDERING", "QA",
+                "GENERATING", "REVIEWING", "SPEAKING", "RENDERING", "QA",
+                "GENERATING", "REVIEWING", "SPEAKING", "RENDERING", "QA",
+                "DONE");
+    }
+
+    @Test
+    @DisplayName("F2-R2 边界：QA 判负恰 maxRounds=5 轮 → FAILED——第 5 判负即终局，无第 6 次生成/渲染")
+    void qaFails_maxRoundsExhausted_failsAfterExactlyFiveJudgments() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(qaFrameCheck.check(any(Path.class)))
+                .thenReturn(new QaFrameCheck.QaResult(false, List.of("FAIL s03 结论卡多处不当折行"), 3));
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
+        assertThat(job.getQaRounds()).isEqualTo(props.getQa().getMaxRounds());
+        verify(qaFrameCheck, times(5)).check(any(Path.class));    // 恰 5 次 QA 判定（off-by-one 修复）
+        verify(materialStation, times(5)).generate(any(), anyList());
+        verify(scriptStation, times(5)).assemble(any(), any(), anyList());
+        verify(renderWorker, times(5)).render(any(Path.class));   // 不出现第 6 渲
+        assertThat(job.getErrorMessage()).contains("QA 审帧 5 轮未过").contains("FAIL s03 结论卡多处不当折行");
+        ArgumentCaptor<CallbackClient.CallbackPayload> payload = ArgumentCaptor.forClass(CallbackClient.CallbackPayload.class);
+        verify(callbackClient).notify(eq(CALLBACK_URL), payload.capture());
+        assertThat(payload.getValue().status()).isEqualTo("FAILED");
+        assertThat(payload.getValue().error()).contains("QA 审帧 5 轮未过");
+    }
+
+    @Test
+    @DisplayName("重生成实效：QA 判负后第二版剧本真正进入渲染与 TTS（workspace 收到新 content）")
+    void qaFails_regeneration_producesNewContent() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        ContentJson v1 = JSON.readValue(CONTENT_JSON, ContentJson.class);
+        ContentJson v2 = JSON.readValue(CONTENT_JSON.replace("第一句口播", "第二版口播"), ContentJson.class);
+        assertThat(v2).isNotEqualTo(v1);
+        when(scriptStation.assemble(any(), any(), anyList())).thenReturn(v1, v2);
+        when(qaFrameCheck.check(any(Path.class)))
+                .thenReturn(new QaFrameCheck.QaResult(false, List.of("FAIL s03 结论卡折行"), 3))
+                .thenReturn(new QaFrameCheck.QaResult(true, List.of(), 3));
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        ArgumentCaptor<ContentJson> rendered = ArgumentCaptor.forClass(ContentJson.class);
+        verify(workspaceManager, times(2)).create(eq(JOB_ID), rendered.capture(), any(), any());
+        assertThat(rendered.getAllValues().get(0)).isEqualTo(v1);   // 首轮渲染旧剧本
+        assertThat(rendered.getAllValues().get(1)).isEqualTo(v2);   // 驳回后渲染重生成的新剧本
+        ArgumentCaptor<ContentJson> spoken = ArgumentCaptor.forClass(ContentJson.class);
+        verify(ttsPipeline, times(2)).synthesizeAll(spoken.capture(), any());
+        assertThat(spoken.getAllValues().get(1)).isEqualTo(v2);     // TTS 朗读的也是新剧本
     }
 
     // ---- 4b. T12 F4 回归：审帧链异常回退重渲，QA→RENDERING→QA 两条 ENTER 均落 history ----

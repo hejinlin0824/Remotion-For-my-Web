@@ -59,4 +59,65 @@ class PromptsDriftGuardTest {
                 .contains("general-list")
                 .contains("itemRef");
     }
+
+    @Test
+    @DisplayName("Ruling-17：SCRIPT 含结论卡/卡片文字硬约束（可执行、可数：单行短式/字数上限/禁止长分式）")
+    void scriptPromptCarriesCardTextHardConstraints() {
+        assertThat(Prompts.SCRIPT)
+                .as("结论卡硬约束段存在")
+                .contains("卡片文字硬约束")
+                .contains("结论卡")
+                .contains("steps 最后一条的 derivation")
+                .as("结论卡只允许一行短式 + 字数上限")
+                .contains("一行短式")
+                .contains("≤ 40")
+                .as("参考形状（R2 修复目标：a\\in[-\\sqrt{3},\\ \\sqrt{3}] 单行短式）")
+                .contains("a\\in[-\\sqrt{3},\\ \\sqrt{3}]")
+                .as("禁止多行推导/换行/长分式")
+                .contains("禁止多行推导")
+                .contains("\\begin{aligned}")
+                .contains("长分式")
+                .contains("\\frac")
+                .as("标签字数上限")
+                .contains("≤6 字标签")
+                .as("R2 实证反例（等号后折行）")
+                .contains("等号后折行");
+    }
+
+    @Test
+    @DisplayName("golden 合规回归：结论卡/generalMethod/pitfalls 文字满足 SCRIPT 硬约束数值")
+    void goldenContentSatisfiesCardTextHardConstraints() throws Exception {
+        JsonNode golden = MAPPER.readTree(goldenFile.toFile());
+
+        // 结论卡 = steps 最后一条的 derivation：单行短式 ≤ 40 字符，无多行推导/长分式/aligned
+        JsonNode steps = golden.path("steps");
+        assertThat(steps.size()).as("golden steps 非空").isGreaterThan(0);
+        String conclusion = steps.path(steps.size() - 1).path("derivation").asText();
+        assertThat(conclusion).as("结论卡 derivation ≤ 40 字符（实测 %d）", conclusion.length())
+                .hasSizeLessThanOrEqualTo(40);
+        assertThat(conclusion)
+                .as("结论卡只允许单行短式")
+                .doesNotContain("\n")
+                .doesNotContain("\\frac")
+                .doesNotContain("\\begin")
+                .doesNotContain("aligned");
+
+        for (JsonNode item : golden.path("generalMethod")) {
+            String step = item.path("step").asText();
+            int labelEnd = step.indexOf('：');
+            assertThat(labelEnd).as("step 以「标签：说明」开头：%s", step).isGreaterThan(0);
+            assertThat(labelEnd).as("标签 ≤ 6 字（%s）", step).isLessThanOrEqualTo(6);
+            assertThat(step.length()).as("step 整行 ≤ 24 字（%s，实测 %d）", step, step.length())
+                    .isLessThanOrEqualTo(24);
+            assertThat(item.path("trick").asText().length())
+                    .as("trick ≤ 40 字（%s）", item.path("trick").asText()).isLessThanOrEqualTo(40);
+        }
+
+        for (JsonNode pitfall : golden.path("pitfalls")) {
+            assertThat(pitfall.path("claim").asText().length())
+                    .as("claim ≤ 20 字（%s）", pitfall.path("claim").asText()).isLessThanOrEqualTo(20);
+            assertThat(pitfall.path("why").asText().length())
+                    .as("why ≤ 40 字（%s）", pitfall.path("why").asText()).isLessThanOrEqualTo(40);
+        }
+    }
 }

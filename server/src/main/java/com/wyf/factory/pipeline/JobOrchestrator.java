@@ -62,7 +62,8 @@ import java.util.function.IntConsumer;
  *       （enterStage CANCELLED + workspace 清理 + 不产 artifacts + 回调）；渲染中不打断（spec §11）。</li>
  *   <li><b>TOCTOU 兜底</b>（T3 评审 M 项）：任何 save 撞乐观锁（如 cancel 并发落库）→ 重读一次
  *       以库内最新状态继续循环，绝不向上抛 500。</li>
- *   <li><b>失败分类</b>（spec §14）：校验驳回 / retryable GlmException / retryable RenderException
+ *   <li><b>失败分类</b>（spec §14）：校验驳回 / QA 判负（Ruling-17：带 FAIL 清单回 GENERATING
+ *       重生成）/ retryable GlmException / retryable RenderException
  *       → 预算内重试（reviewRetries、genRetries、extractRetries、qaRounds）；
  *       FatalExtractException / TtsFatalException / 预算尽 → FAILED（errorMessage + lastError=堆栈尾
  *       2000 字符 + workspace 保留 + 回调）。</li>
@@ -545,6 +546,10 @@ public class JobOrchestrator {
      * 上限 app.qa.maxRounds）。RENDERING 中就地重渲；QA 中回退 RENDERING（canTransit QA→RENDERING）。
      * 修复轮 I2：!isRetryable 的渲染异常（配置/内容性失败）直接 FAILED，不进循环。
      *
+     * <p>与 {@link #qaRetryOrFail} 的分工（Ruling-17）：本方法只处理渲染/审帧链<b>异常</b>
+     * （exit≠0/超时等环境性失败，就地/回退重渲）；QA <b>判负</b>（审帧出了 FAIL 清单）走
+     * qaRetryOrFail 回 GENERATING 重生成，不在本方法重试。</p>
+     *
      * <p>T12 F4 复盘：就地重渲分支不发生状态迁移（canTransit(RENDERING,RENDERING)=false），
      * 按设计不落 stageHistory——历史只记 canTransit 成功的 ENTER，痕迹是 qaRounds/lastError。
      * E2E 报告曾把 job1 的 qa=1 误读作「QA→RENDERING→QA 两条迁移丢 history」，
@@ -566,22 +571,48 @@ public class JobOrchestrator {
         return failJob(job, "渲染/审帧链失败预算（" + props.getQa().getMaxRounds() + "）耗尽：" + e.getMessage(), e, ctx);
     }
 
+    /**
+     * QA 判负路由（Ruling-17 结构性主修，R2 实证驱动）：QA 判负 ≠ 环境性失败——job1 六轮
+     * 驳回同因（结论卡折行类生成内容缺陷），盲重渲 6/6 复现同缺陷，随机重试对几何溢出类
+     * 缺陷命中率极低。故预算内判负 → <b>带 FAIL 清单回 GENERATING 重生成</b>（与 V1-V4 驳回
+     * 同一机制、同一错误注入通道），素材/剧本/TTS/渲染随之自然重做；qaRounds 继续计数，
+     * 第 maxRounds 轮判负 → FAILED。
+     *
+     * <p>F2-R2 off-by-one 修复：先自增后比较（qaRounds = 已消耗轮数），maxRounds=5 恰好
+     * 5 次 QA 判定——旧代码先比较后自增实跑 6 判 6 渲，第 6 判负才 FAILED 且报文仍称 5 轮。</p>
+     *
+     * <p>分工边界：本方法只服务 QA <b>判负</b>；渲染/QA 链异常（exit≠0/超时等环境性失败）
+     * 走 {@link #renderRetryOrFail} 的就地重渲/回退重渲路径，保持不变。</p>
+     */
     private Job qaRetryOrFail(Job job, QaFrameCheck.QaResult result, Ctx ctx) {
+        int round = job.getQaRounds() + 1;
+        job.setQaRounds(round);
         String fails = String.join("; ", result.fails());
-        if (job.getQaRounds() < props.getQa().getMaxRounds()) {
-            job.setQaRounds(job.getQaRounds() + 1);
+        if (round < props.getQa().getMaxRounds()) {
+            List<String> errors = new ArrayList<>(result.fails());
+            if (errors.isEmpty()) {
+                // T7 评审 I 项同款兜底：判负却无具体 FAIL 行时补通用理由，避免空清单重试
+                errors.add("QA 审帧判负（审帧器未给出具体 FAIL 行）");
+            }
+            ctx.reviewErrors = List.copyOf(errors);
+            // 修复轮 I1 同理：清续跑标记——QA 驳回后 GENERATING 必须真正重生成
+            ctx.contentResumed = false;
+            // 剧本将重生成 → 旧 TTS 音频/台词 wav 全部作废，SPEAKING 必须整段重录
+            ctx.audioMeta = null;
+            ctx.lineWavs = Map.of();
             job.setLastError(tail(fails, LAST_ERROR_TAIL));
-            discardStaleFinalQuietly(job);
-            return enterAndSaveAndReturn(job, JobStatus.RENDERING,
-                    "QA 未过（第 " + job.getQaRounds() + " 轮），全片重渲染");
+            discardStaleFinalQuietly(job);   // 既有路径：删旧成片，防 RENDERING 断点判定跳过重渲
+            return enterAndSaveAndReturn(job, JobStatus.GENERATING,
+                    "QA 未过（第 " + round + " 轮），FAIL 清单回传重生成");
         }
         return failJob(job, "QA 审帧 " + props.getQa().getMaxRounds() + " 轮未过：" + fails, null, ctx);
     }
 
     /**
-     * QA 重渲前丢弃上轮被判废的成片（golden 2026-08-29 实测 bug）：doRendering 入口以
+     * QA 判负/重渲路由前丢弃上轮被判废的成片（golden 2026-08-29 实测 bug）：doRendering 入口以
      * {@code final.mp4 已在盘} 判定断点续跑跳过渲染，不删旧片则「全片重渲染」永不发生，
-     * QA 逐轮复审同一批废帧直至预算耗尽（QA 重试机制整体空转）。
+     * QA 逐轮复审同一批废帧直至预算耗尽（QA 重试机制整体空转）。Ruling-17 的 QA→GENERATING
+     * 路由同样必须先删——重生成后的重渲才能真实发生。
      */
     private void discardStaleFinalQuietly(Job job) {
         try {
