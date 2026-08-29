@@ -23,8 +23,8 @@ import java.util.Map;
  * 复用（Task 13b：根除逐帧 {@code npx remotion still} 每帧 ~35s bundler 冷启动），stdout 行
  * {@code 名\t帧\tok}，失败行据此归因；③ {@code python scripts/qa_glm.py}，GLM key 以
  * ZHIPU_API_KEY 只进子进程 env（绝不进命令行/stdout/日志）。exit=0 → pass；exit!=0 →
- * 收集 out/qa/report.md 含 FAIL 的行为 fails，无 FAIL 行则 fails=[qa_glm exit=N]；
- * 帧清单为空 → 防呆 fail。
+ * 收集 out/qa/report.md 的 FAIL 行与独立 ERROR 行（后者加 {@code [error] } 前缀，Task 14b），
+ * 两者皆无则 fails=[qa_glm exit=N]；帧清单为空 → 防呆 fail。
  */
 @Component
 public class QaFrameCheck {
@@ -151,7 +151,11 @@ public class QaFrameCheck {
                 : stripped.substring(0, STDERR_DIGEST_CHARS) + "…";
     }
 
-    /** exit!=0 的 fails 归因：report.md 含 FAIL 的行优先，否则降级为 qa_glm exit=N。 */
+    /**
+     * exit!=0 的 fails 归因：report.md 含 FAIL 的行（模型判负）与独立 ERROR 行
+     * （{@code ERROR <帧名>\t<摘要>}，qa_glm 单帧最终失败；Task 14b F3-R2 归因缺口）都收集，
+     * ERROR 条目以 {@code [error] } 前缀区分；两者皆无 → 降级为 qa_glm exit=N（真崩溃兜底，现状保留）。
+     */
     private List<String> collectFails(Path ws, ProcessResult qa) {
         List<String> fails = new ArrayList<>();
         Path report = ws.resolve("out/qa/report.md");
@@ -159,7 +163,9 @@ public class QaFrameCheck {
             try {
                 for (String line : Files.readAllLines(report, StandardCharsets.UTF_8)) {
                     String trimmed = line.strip();
-                    if (trimmed.contains("FAIL")) {
+                    if (trimmed.startsWith("ERROR ")) {
+                        fails.add("[error] " + trimmed.substring("ERROR ".length()));
+                    } else if (trimmed.contains("FAIL")) {
                         fails.add(trimmed);
                     }
                 }

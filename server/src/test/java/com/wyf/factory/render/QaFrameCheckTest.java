@@ -23,8 +23,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * QaFrameCheck（fake ProcessRunner 注入，零真调、零 GLM 成本）：
  * pick_frames stdout 解析（totalFrames 行跳过/tab 分隔/前缀行名）、单次 qa_stills 批量调用
  * （manifest 内容=解析结果、非逐帧 N 次 spawn）、qa_stills stdout 失败行收集、
- * qa_glm key 只进子进程 env、exit=1 + report.md FAIL 行收集、无 FAIL 行 → ["qa_glm exit=N"]、
- * 空帧清单防呆。
+ * qa_glm key 只进子进程 env、exit=1 + report.md FAIL 行收集、独立 ERROR 行 → [error] 前缀收集
+ * （FAIL/ERROR 混合都收）、无 FAIL/ERROR 行 → ["qa_glm exit=N"] 兜底、空帧清单防呆。
  */
 class QaFrameCheckTest {
 
@@ -114,10 +114,75 @@ class QaFrameCheckTest {
     }
 
     @Test
-    @DisplayName("qa_glm exit=1 但无 FAIL 行 → fails=[qa_glm exit=1]")
+    @DisplayName("qa_glm exit=1 + report.md 含独立 ERROR 行（单帧最终失败）→ fails 以 [error] 前缀收集该行")
+    void qaFails_errorLinesCollectedWithErrorPrefix() throws Exception {
+        runner.pickFramesStdout = "totalFrames = 100\ns-s01-problem-card\t30\n";
+        runner.qaResult = new ProcessResult(1, "", "", false);
+        Path qaDir = ws.resolve("out/qa");
+        Files.createDirectories(qaDir);
+        Files.writeString(qaDir.resolve("report.md"), """
+                # GLM 审帧报告 — glm-5.3-flash
+
+                ## s-s01-problem-card.png
+
+                [error] 重试耗尽（ConnectTimeout: connection reset by peer）
+
+                ERROR s-s01-problem-card.png\t重试耗尽（ConnectTimeout: connection reset by peer）
+                """, StandardCharsets.UTF_8);
+
+        QaFrameCheck.QaResult result = qa.check(ws);
+
+        assertThat(result.pass()).isFalse();
+        assertThat(result.fails()).containsExactly(
+                "[error] s-s01-problem-card.png\t重试耗尽（ConnectTimeout: connection reset by peer）");
+        assertThat(result.framesChecked()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("qa_glm exit=1 + report.md FAIL 行与 ERROR 行混合 → 两者按报告行序都收集")
+    void qaFails_mixedFailAndErrorLines() throws Exception {
+        runner.pickFramesStdout = "totalFrames = 200\ns-s01-problem-card\t30\ns-s02-knowledge-card\t90\n";
+        runner.qaResult = new ProcessResult(1, "", "", false);
+        Path qaDir = ws.resolve("out/qa");
+        Files.createDirectories(qaDir);
+        Files.writeString(qaDir.resolve("report.md"), """
+                # GLM 审帧报告 — glm-5.3-flash
+
+                ## s-s01-problem-card.png
+
+                1) 重叠。2) 无乱码。
+                FAIL（文字卡片重叠溢出画面边界）
+
+                ## s-s02-knowledge-card.png
+
+                [error] 重试耗尽（HTTP 429）
+
+                ERROR s-s02-knowledge-card.png\t重试耗尽（HTTP 429）
+                """, StandardCharsets.UTF_8);
+
+        QaFrameCheck.QaResult result = qa.check(ws);
+
+        assertThat(result.pass()).isFalse();
+        assertThat(result.fails()).containsExactly(
+                "FAIL（文字卡片重叠溢出画面边界）",
+                "[error] s-s02-knowledge-card.png\t重试耗尽（HTTP 429）");
+    }
+
+    @Test
+    @DisplayName("qa_glm exit=1 但 report.md 无 FAIL/ERROR 行（PASS-only）→ 兜底 fails=[qa_glm exit=1]")
     void qaFails_noFailLines() throws Exception {
         runner.pickFramesStdout = "totalFrames = 100\ns-s01-problem-card\t30\n";
         runner.qaResult = new ProcessResult(1, "[fatal] 未找到 GLM Key", "", false);
+        Path qaDir = ws.resolve("out/qa");
+        Files.createDirectories(qaDir);
+        Files.writeString(qaDir.resolve("report.md"), """
+                # GLM 审帧报告 — glm-5.3-flash
+
+                ## s-s01-problem-card.png
+
+                1) 无重叠。2) 无乱码。
+                PASS
+                """, StandardCharsets.UTF_8);
 
         QaFrameCheck.QaResult result = qa.check(ws);
 

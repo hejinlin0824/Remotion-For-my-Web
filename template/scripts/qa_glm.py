@@ -6,6 +6,8 @@ Key: ZHIPU_API_KEY / ZHIPUAI_API_KEY / GLM_API_KEY 环境变量，回落 ~/.clau
 并发: ThreadPoolExecutor 并发审帧，QA_GLM_CONCURRENCY 可调（默认 4）；prompt/FAIL 标准/report 格式/exit 语义与串行版一致，
       report.md 仍按帧序输出（结果收集后按序写），每帧独立重试退避、429/超时按帧隔离（单帧最终失败 → 汇总 exit 1）。
 输出: out/qa/report.md；任一 FAIL → exit 1
+归因: 单帧最终失败（重试尽/非 200，非模型判负）时另写独立行 `ERROR <帧名>\t<摘要≤120字符>`（摘要含异常类或
+      退避后状态码），与模型 FAIL 行明确区分——并行化把错误细节隔离在进程内，report.md 是下游唯一归因面（F3-R2）。
 """
 import base64, json, mimetypes, os, pathlib, sys, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -47,6 +49,7 @@ def check(key, path):
     body = {"model": MODEL, "max_tokens": 4096, "messages": [{"role": "user", "content": [
         {"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}},
         {"type": "text", "text": PROMPT}]}]}
+    cause = "重试耗尽"  # 最后一次失败的归因（退避后状态码/异常类），进最终错误摘要
     for attempt in range(5):
         try:
             r = requests.post(API_URL, headers={
@@ -54,17 +57,19 @@ def check(key, path):
                 "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
                 json=body, timeout=180)
             if r.status_code == 429 or r.status_code >= 500:
+                cause = f"HTTP {r.status_code}"
                 time.sleep(20 * (attempt + 1)); continue
             if r.status_code != 200:
                 return f"[error] {r.status_code} {r.text[:200]}", False
             text = "".join(p.get("text", "") for p in r.json().get("content", []) if p.get("type") == "text").strip()
             if not text:
-                time.sleep(8); continue  # 200 但正文为空（thinking 吃满预算）→ 视为瞬态错误重试
+                cause = "空正文"; time.sleep(8); continue  # 200 但正文为空（thinking 吃满预算）→ 瞬态错误重试
             ok = "PASS" in text.splitlines()[-1].upper()
             return text, ok
-        except Exception:
+        except Exception as e:
+            cause = f"{type(e).__name__}: {e}"
             time.sleep(5)
-    return "[error] 重试耗尽", False
+    return f"[error] 重试耗尽（{cause}）", False
 
 def audit(key, indexed):
     i, p = indexed
@@ -90,6 +95,8 @@ def main():
         lines.append(f"## {p.name}\n\n{text}\n")
         if not ok:
             fails.append(p.name)
+            if text.startswith("[error]"):  # 单帧最终失败（异常/非 200，非模型判负）→ 独立错误行，供下游逐帧归因
+                lines.append(f"ERROR {p.name}\t{text.removeprefix('[error] ').strip()[:120]}\n")
     out = root/"out"/"qa"/"report.md"
     if out.exists():
         out.replace(out.with_name("report_prev.md"))  # 写前备份上一轮报告
