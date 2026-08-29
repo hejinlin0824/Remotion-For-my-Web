@@ -544,6 +544,11 @@ public class JobOrchestrator {
      * 渲染/QA 链失败预算：与 QA 轮次共用 qaRounds（画面类失败与审帧同属"渲染-审帧"循环，
      * 上限 app.qa.maxRounds）。RENDERING 中就地重渲；QA 中回退 RENDERING（canTransit QA→RENDERING）。
      * 修复轮 I2：!isRetryable 的渲染异常（配置/内容性失败）直接 FAILED，不进循环。
+     *
+     * <p>T12 F4 复盘：就地重渲分支不发生状态迁移（canTransit(RENDERING,RENDERING)=false），
+     * 按设计不落 stageHistory——历史只记 canTransit 成功的 ENTER，痕迹是 qaRounds/lastError。
+     * E2E 报告曾把 job1 的 qa=1 误读作「QA→RENDERING→QA 两条迁移丢 history」，
+     * 原始 30s 轮询证实迁移从未发生（RENDERING 连续、qa=1 后无第二次 +1）。</p>
      */
     private Job renderRetryOrFail(Job job, RenderWorker.RenderException e, Ctx ctx) {
         if (!e.isRetryable()) {

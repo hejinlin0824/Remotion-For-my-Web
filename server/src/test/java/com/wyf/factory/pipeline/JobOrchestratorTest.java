@@ -322,6 +322,33 @@ class JobOrchestratorTest {
                 "RENDERING", "QA", "RENDERING", "QA", "RENDERING", "QA", "DONE");
     }
 
+    // ---- 4b. T12 F4 回归：审帧链异常回退重渲，QA→RENDERING→QA 两条 ENTER 均落 history ----
+
+    @Test
+    @DisplayName("F4 回归：QA 审帧链 retryable 异常（EPERM 形态）→ 回退重渲，QA→RENDERING→QA 两条 ENTER 均在 stageHistory")
+    void qaChainException_rerender_historyRecordsBothEnters() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(qaFrameCheck.check(any(Path.class)))
+                .thenThrow(new RenderWorker.RenderException(
+                        "审帧截图失败（s01 帧 0）exit=1：EPERM: operation not permitted, rmdir", true))
+                .thenReturn(new QaFrameCheck.QaResult(true, List.of(), 3));
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        verify(renderWorker, times(2)).render(any(Path.class));   // 回退后全片重渲一次
+        assertThat(job.getQaRounds()).isEqualTo(1);
+        // 关键不变量：每次 canTransit 成功都恰落一条 ENTER——两条迁移均不得缺席
+        assertThat(historyStages(job)).containsExactly(
+                "QUEUED", "EXTRACTING", "GENERATING", "REVIEWING", "SPEAKING",
+                "RENDERING", "QA", "RENDERING", "QA", "DONE");
+        assertThat(job.getStageHistory())
+                .extracting(StageHistoryEntry::getNote)
+                .anySatisfy(note -> assertThat(note).contains("审帧链异常"));
+    }
+
     // ---- 5. 审题判死 → 直接 FAILED ----
 
     @Test
