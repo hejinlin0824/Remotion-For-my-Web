@@ -1,0 +1,94 @@
+{
+  "meta": { "aspect": "16:9", "problemType": "计算题" },
+  "problem": {
+    "lines": [
+      { "id": "L1", "segments": [
+        { "type": "text", "value": "已知函数 " },
+        { "type": "math", "value": "f(x)=x^{3}+ax^{2}+x" },
+        { "type": "text", "value": "，" }
+      ]},
+      { "id": "L2", "segments": [
+        { "type": "text", "value": "若 " },
+        { "type": "math", "value": "f(x)" },
+        { "type": "text", "value": " 在 " },
+        { "type": "math", "value": "\\mathbb{R}" },
+        { "type": "text", "value": " 上单调递增，" }
+      ]},
+      { "id": "L3", "segments": [
+        { "type": "text", "value": "求实数 " },
+        { "type": "math", "value": "a" },
+        { "type": "text", "value": " 的取值范围。" }
+      ]}
+    ]
+  },
+  "knowledge": [
+    { "claim": "可导函数在区间上单调递增，等价于导数在该区间上恒非负",
+      "formula": "f(x)\\text{ 在 }I\\text{ 上单调递增}\\iff f'(x)\\ge 0\\ \\text{在}\\ I\\text{ 上恒成立}",
+      "premise": "f(x) 在区间 I 内可导；考纲默认单调递增允许导数存在个别零点",
+      "trap": "误写成 f'(x)>0 严格恒正，会漏掉判别式取等（导数有零点）的临界情形" },
+    { "claim": "二次函数在全体实数上恒非负的充要条件",
+      "formula": "ax^{2}+bx+c\\ge 0\\ (\\forall x\\in\\mathbb{R})\\iff a>0\\ \\text{且}\\ \\Delta=b^{2}-4ac\\le 0",
+      "premise": "二次项系数 a 非零且需先确认开口方向；若系数含参数还需讨论系数是否为零",
+      "trap": "只验证判别式而忽略开口方向；本题二次项系数为常数 3，无需讨论开口" },
+    { "claim": "恒成立求参数范围的两种常用路径：判别式法与分离参数法",
+      "formula": "\\Delta\\le 0\\quad\\text{或}\\quad a\\ge g(x)_{\\max}\\ (\\text{或}\\ a\\le g(x)_{\\min})",
+      "premise": "二次型结构优先判别式法；参数能干净分离且能求最值时用分离参数法",
+      "trap": "分离参数后取等号能否成立需单独检验，端点开闭不能凭感觉" }
+  ],
+  "steps": [
+    { "usesAnchor": "L1", "statement": "写出 f(x) 的表达式并对 f(x) 求导",
+      "derivation": "f'(x)=3x^{2}+2ax+1",
+      "note": "幂函数求导法则：x^n 的导数为 n x^{n-1}；三次函数的导数是二次函数" },
+    { "usesAnchor": "L2", "statement": "把「在 ℝ 上单调递增」翻译为导数恒非负",
+      "derivation": "3x^{2}+2ax+1\\ge 0\\ \\text{对一切}\\ x\\in\\mathbb{R}\\ \\text{成立}",
+      "note": "这是本题的关键转化：单调性条件等价于导函数定号（非负）" },
+    { "usesAnchor": "L2", "statement": "确认二次函数开口方向并写出恒非负的判别条件",
+      "derivation": "3>0\\ \\text{且}\\ \\Delta=(2a)^{2}-4\\times 3\\times 1\\le 0",
+      "note": "二次项系数 3 为正常数，开口向上，故只需判别式不大于零" },
+    { "usesAnchor": "L3", "statement": "化简判别式并解关于 a 的不等式",
+      "derivation": "4a^{2}-12\\le 0\\iff a^{2}\\le 3\\iff -\\sqrt{3}\\le a\\le \\sqrt{3}",
+      "note": "a^2≤3 等价于 |a|≤√3，开方时正负两支都要写全" },
+    { "usesAnchor": "L3", "statement": "写出 a 的取值范围作为最终结论",
+      "derivation": "a\\in[-\\sqrt{3},\\ \\sqrt{3}]",
+      "note": "判别式等于零时 f'(x) 仅有一个零点，不影响单调递增，故端点取得到，区间为闭" }
+  ],
+  "pitfalls": [
+    { "claim": "把条件写成 f'(x)>0 严格大于零",
+      "why": "漏掉 Δ=0 的临界情形，丢掉 a=±√3 两个端点；判别式为零时导数仅在一点为零，函数仍单调递增" },
+    { "claim": "不确认开口方向就直接用判别式",
+      "why": "开口向下时恒非负无解；本题系数为常数 3 可直接判断，但若系数含参数必须先讨论" },
+    { "claim": "求出 a²≤3 后只写 a≤√3 而漏掉负半支",
+      "why": "|a|≤√3 对应正负两个不等式，漏掉 -√3≤a 直接丢掉一半解集" }
+  ],
+  "generalMethod": [
+    { "step": "识别：可导函数 + 给定区间上单调",
+      "trick": "立刻联想「单调性 ⇔ 导数恒定号」的标准翻译" },
+    { "step": "转化：单调递增 ⇔ 导数恒 ≥0（递减 ⇔ 恒 ≤0）",
+      "trick": "导数是二次型时优先判别式法；参数能分离且易求最值时用分离参数法" },
+    { "step": "求解：先看开口方向，再解不等式",
+      "trick": "口诀「先开口，后判别」；开方解 |a| 型不等式时正负两支写全" },
+    { "step": "回验：检验取等情形与端点开闭",
+      "trick": "把临界值代回验证单调性是否仍成立，再决定区间开闭" }
+  ],
+  "scenes": [
+    { "id": "s01", "act": 2, "component": "problem-card", "ttsText": "我们先看这道题。题目给了一个含参数 a 的三次函数，条件是在全体实数上单调递增，最后要的是 a 的取值范围。三个信息点都圈出来，心里有个框架。", "props": {} },
+    { "id": "s02", "act": 2, "component": "knowledge-card", "ttsText": "第一件事，回顾考点。可导函数在区间上单调递增，等价于导数在这个区间恒大于等于零。注意是大于等于，不是严格大于，导数有零点不影响单调。", "props": { "knowledgeRef": 1 } },
+    { "id": "s03", "act": 2, "component": "knowledge-card", "ttsText": "第二个考点，二次函数在全体实数上恒非负怎么判？开口向上，判别式小于等于零，两个条件缺一不可。这题的二次项系数是常数，开口方向不用讨论。", "props": { "knowledgeRef": 2 } },
+    { "id": "s04", "act": 2, "component": "knowledge-card", "ttsText": "第三个考点是路径选择。恒成立求参数，二次结构优先判别式法，参数能干净分离就用分离参数法。走哪条路，最后都得检验端点开闭。", "props": { "knowledgeRef": 3 } },
+    { "id": "s05", "act": 3, "component": "step-card", "ttsText": "进入解法。第一步，对 f(x) 求导，得到一个二次函数，三次函数的导数就是二次函数。", "props": { "stepRef": 1 } },
+    { "id": "s06", "act": 3, "component": "derivation-popup", "ttsText": "求导用幂函数法则：x 的三次方系数三落下来，平方项变成一次项二 ax，一次项求导得到常数一，常数项直接归零。", "props": { "stepRef": 1, "formula": "f'(x)=3x^{2}+2ax+1" } },
+    { "id": "s07", "act": 3, "component": "step-card", "ttsText": "第二步，全题最关键的翻译。在 R 上单调递增，就是这个二次函数对一切实数都大于等于零，恒成立。想通这一点，题目就从导数题变成不等式题了。", "props": { "stepRef": 2 } },
+    { "id": "s08", "act": 3, "component": "step-card", "ttsText": "第三步，落实恒非负的条件。二次项系数是 3，正数，开口向上已经满足，剩下的条件就是判别式不大于零。", "props": { "stepRef": 3 } },
+    { "id": "s09", "act": 3, "component": "derivation-popup", "ttsText": "判别式自己动手代一遍：一次项系数是 2a，平方就是 4a 方，再减去 4 乘 3 乘 1，也就是减 12，让它小于等于零。", "props": { "stepRef": 3, "formula": "\\Delta=(2a)^{2}-4\\times 3\\times 1\\le 0" } },
+    { "id": "s10", "act": 3, "component": "step-card", "ttsText": "第四步，解这个不等式。4a 方小于等于 12，约成 a 方小于等于 3，开方得到负根号 3 小于等于 a 小于等于根号 3。开方别忘了正负两支。", "props": { "stepRef": 4 } },
+    { "id": "s11", "act": 3, "component": "step-card", "ttsText": "最后下结论：a 属于闭区间，负根号 3 到根号 3。判别式等于零时导数只有一个零点，不影响单调递增，所以两个端点都取得到，区间是闭的。", "props": { "stepRef": 5 } },
+    { "id": "s12", "act": 3, "component": "pitfall-card", "ttsText": "第一个易错点：把条件写成导数严格大于零。Δ 等于零的临界情形被你丢了，两个端点直接没了，这题就成了会而不对。", "props": { "pitfallRef": 1 } },
+    { "id": "s13", "act": 3, "component": "pitfall-card", "ttsText": "第二个易错点：开口方向不确认就上判别式。本题系数是常数 3 可以直接判断，但系数含参数时必须先讨论，记住口诀，先开口，后判别。", "props": { "pitfallRef": 2 } },
+    { "id": "s14", "act": 3, "component": "pitfall-card", "ttsText": "第三个易错点：解出 a 方小于等于 3 后，只写 a 小于等于根号 3，把负半支丢了。绝对值不等式要双向写全，漏一半解集等于白做。", "props": { "pitfallRef": 3 } },
+    { "id": "s15", "act": 3, "component": "checklist-card", "ttsText": "交卷前对一遍清单：是不是恒大于等于零而不是严格大于？开口方向确认过了吗？开方时正负两支写全了吗？三秒检查，把分稳稳拿满。", "props": { "pitfallRefs": [1, 2, 3] } },
+    { "id": "s16", "act": 4, "component": "general-list", "ttsText": "以后怎么做？第一步，识别题型。看到可导函数加上区间单调，立刻反应出导数恒定号，这是标准翻译。", "props": { "itemRef": 1 } },
+    { "id": "s17", "act": 4, "component": "general-list", "ttsText": "第二步，转化成恒成立。递增对应导数恒非负，递减对应恒非正。导数是二次型就优先判别式法，参数能分离就用分离参数法。", "props": { "itemRef": 2 } },
+    { "id": "s18", "act": 4, "component": "general-list", "ttsText": "第三步，求解阶段先看开口方向，再解不等式。开方解绝对值型不等式时，正负两支都要写全，别只留一半。", "props": { "itemRef": 3 } },
+    { "id": "s19", "act": 4, "component": "general-list", "ttsText": "最后一步，回验。把临界值代回验证单调性是否仍成立，再决定区间开闭。记住这四步流程，这类题就是送分题。", "props": { "itemRef": 4 } }
+  ]
+}
