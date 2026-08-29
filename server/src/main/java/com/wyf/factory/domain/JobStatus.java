@@ -1,0 +1,41 @@
+package com.wyf.factory.domain;
+
+import java.util.Set;
+
+/**
+ * 任务状态机（spec §11）。
+ *
+ * <pre>
+ * 正向链：QUEUED→EXTRACTING→GENERATING→REVIEWING→SPEAKING→RENDERING→QA→DONE
+ * 回退：QA→RENDERING（QA 轮次重渲染）、REVIEWING→GENERATING（驳回重生成）
+ * 终态迁移：任意非终态→FAILED；QUEUED/EXTRACTING/GENERATING/REVIEWING→CANCELLED
+ * （SPEAKING 起不可取消）；其余一律 false，含终态→任何、自身→自身。
+ * </pre>
+ */
+public enum JobStatus {
+    QUEUED, EXTRACTING, GENERATING, REVIEWING, SPEAKING, RENDERING, QA, DONE, FAILED, CANCELLED;
+
+    private static final Set<JobStatus> TERMINAL = Set.of(DONE, FAILED, CANCELLED);
+
+    /** 是否终态（DONE/FAILED/CANCELLED）：终态不可再迁移。 */
+    public boolean isTerminal() {
+        return TERMINAL.contains(this);
+    }
+
+    /** 合法迁移判定：非法组合（含 null、自身、终态出发）一律 false。 */
+    public static boolean canTransit(JobStatus from, JobStatus to) {
+        if (from == null || to == null || from == to || from.isTerminal()) {
+            return false;
+        }
+        return switch (from) {
+            case QUEUED -> to == EXTRACTING || to == FAILED || to == CANCELLED;
+            case EXTRACTING -> to == GENERATING || to == FAILED || to == CANCELLED;
+            case GENERATING -> to == REVIEWING || to == FAILED || to == CANCELLED;
+            case REVIEWING -> to == SPEAKING || to == GENERATING || to == FAILED || to == CANCELLED;
+            case SPEAKING -> to == RENDERING || to == FAILED;
+            case RENDERING -> to == QA || to == FAILED;
+            case QA -> to == DONE || to == RENDERING || to == FAILED;
+            default -> false; // 终态已在入口拦截
+        };
+    }
+}

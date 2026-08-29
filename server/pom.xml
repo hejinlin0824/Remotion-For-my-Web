@@ -70,8 +70,8 @@
                         <artifactId>maven-surefire-plugin</artifactId>
                         <configuration>
                             <groups>slow</groups>
-                            <!-- -Pslow 时不再排除，只跑 slow 组 -->
-                            <excludedGroups/>
+                            <!-- -Pslow 时不再排除，只跑 slow 组；combine.self=override 清掉默认的 excludedGroups（空节点会被 profile 合并做 gap-fill，清不掉） -->
+                            <excludedGroups combine.self="override"/>
                         </configuration>
                     </plugin>
                 </plugins>

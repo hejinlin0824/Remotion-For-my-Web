@@ -1,0 +1,187 @@
+package com.wyf.factory.domain;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Convert;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.Id;
+import jakarta.persistence.Lob;
+import jakarta.persistence.PrePersist;
+import jakarta.persistence.PreUpdate;
+import jakarta.persistence.Table;
+import jakarta.persistence.Version;
+
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+
+/**
+ * 讲题任务实体（jobs 表）。语义来源 spec §11：状态机 + 队列 + 断点续跑。
+ *
+ * <ul>
+ *   <li>id：UUID，代码生成（构造器/@PrePersist 兜底）；</li>
+ *   <li>status：非终态默认 QUEUED；阶段推进只走 {@link #enterStage}（校验状态机）；</li>
+ *   <li>stage：当前阶段描述，v1 与 status.name() 同步；</li>
+ *   <li>stageHistory：JSON 存 CLOB（{@link StageHistoryEntry.StageHistoryConverter}）；</li>
+ *   <li>createdAt/updatedAt：手工审计（@PrePersist/@PreUpdate），不用 Spring Data auditing；</li>
+ *   <li>version：@Version 乐观锁——领单协议的抢占依据（见 JobRepository javadoc）。</li>
+ * </ul>
+ */
+@Entity
+@Table(name = "jobs")
+public class Job {
+
+    @Id
+    @Column(length = 36)
+    private String id;
+
+    @Enumerated(EnumType.STRING)
+    @Column(length = 20, nullable = false)
+    private JobStatus status;
+
+    /** 当前阶段描述，v1 与 status 同步 */
+    @Column(length = 20)
+    private String stage;
+
+    /** "TEXT" | "IMAGE" */
+    @Column(length = 10, nullable = false)
+    private String inputType;
+
+    /** 文本题干（TEXT 路径） */
+    @Lob
+    private String inputText;
+
+    /** 截图 base64（IMAGE 路径，可空） */
+    @Lob
+    private byte[] imageBase64;
+
+    /** 画幅，唯一合法值 "16:9"（Global Constraint 2） */
+    @Column(length = 10)
+    private String aspect;
+
+    @Column(length = 50)
+    private String voice;
+
+    private String callbackUrl;
+
+    /** 取消标记：阶段间检查点发现即停（SPEAKING 起不可取消） */
+    private boolean cancelRequested;
+
+    /** 各阶段重试计数（spec §10 上限） */
+    private int extractRetries;
+    private int genRetries;
+    private int reviewRetries;
+    private int ttsRetries;
+    private int qaRounds;
+
+    /** 最近一次阶段内错误（可重试路径） */
+    @Lob
+    private String lastError;
+
+    /** 终态原因（FAILED/CANCELLED 时写入） */
+    @Lob
+    private String errorMessage;
+
+    private String artifactsDir;
+
+    @Convert(converter = StageHistoryEntry.StageHistoryConverter.class)
+    @Column(columnDefinition = "CLOB")
+    private List<StageHistoryEntry> stageHistory = new ArrayList<>();
+
+    private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
+
+    @Version
+    private long version;
+
+    public Job() {
+        this.id = UUID.randomUUID().toString();
+        this.status = JobStatus.QUEUED;
+        this.stage = this.status.name();
+        this.createdAt = LocalDateTime.now();
+        this.updatedAt = this.createdAt;
+        this.stageHistory.add(new StageHistoryEntry(
+                this.status.name(), StageHistoryEntry.STATE_ENTER, "入队", this.createdAt));
+    }
+
+    /**
+     * 进入下一阶段：校验 {@link JobStatus#canTransit}，非法迁移抛 {@link IllegalStateException}；
+     * 合法则同步 status/stage/updatedAt 并追加一条 ENTER 历史。
+     */
+    public void enterStage(JobStatus to, String note) {
+        if (!JobStatus.canTransit(this.status, to)) {
+            throw new IllegalStateException("非法状态迁移: " + this.status + " -> " + to);
+        }
+        this.status = to;
+        this.stage = to.name();
+        this.updatedAt = LocalDateTime.now();
+        this.stageHistory.add(new StageHistoryEntry(to.name(), StageHistoryEntry.STATE_ENTER, note, this.updatedAt));
+    }
+
+    @PrePersist
+    void onCreate() {
+        if (id == null || id.isBlank()) {
+            id = UUID.randomUUID().toString();
+        }
+        if (status == null) {
+            status = JobStatus.QUEUED;
+        }
+        if (createdAt == null) {
+            createdAt = LocalDateTime.now();
+        }
+        if (updatedAt == null) {
+            updatedAt = createdAt;
+        }
+    }
+
+    @PreUpdate
+    void onUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
+
+    public String getId() { return id; }
+    public void setId(String id) { this.id = id; }
+    public JobStatus getStatus() { return status; }
+    public void setStatus(JobStatus status) { this.status = status; }
+    public String getStage() { return stage; }
+    public void setStage(String stage) { this.stage = stage; }
+    public String getInputType() { return inputType; }
+    public void setInputType(String inputType) { this.inputType = inputType; }
+    public String getInputText() { return inputText; }
+    public void setInputText(String inputText) { this.inputText = inputText; }
+    public byte[] getImageBase64() { return imageBase64; }
+    public void setImageBase64(byte[] imageBase64) { this.imageBase64 = imageBase64; }
+    public String getAspect() { return aspect; }
+    public void setAspect(String aspect) { this.aspect = aspect; }
+    public String getVoice() { return voice; }
+    public void setVoice(String voice) { this.voice = voice; }
+    public String getCallbackUrl() { return callbackUrl; }
+    public void setCallbackUrl(String callbackUrl) { this.callbackUrl = callbackUrl; }
+    public boolean isCancelRequested() { return cancelRequested; }
+    public void setCancelRequested(boolean cancelRequested) { this.cancelRequested = cancelRequested; }
+    public int getExtractRetries() { return extractRetries; }
+    public void setExtractRetries(int extractRetries) { this.extractRetries = extractRetries; }
+    public int getGenRetries() { return genRetries; }
+    public void setGenRetries(int genRetries) { this.genRetries = genRetries; }
+    public int getReviewRetries() { return reviewRetries; }
+    public void setReviewRetries(int reviewRetries) { this.reviewRetries = reviewRetries; }
+    public int getTtsRetries() { return ttsRetries; }
+    public void setTtsRetries(int ttsRetries) { this.ttsRetries = ttsRetries; }
+    public int getQaRounds() { return qaRounds; }
+    public void setQaRounds(int qaRounds) { this.qaRounds = qaRounds; }
+    public String getLastError() { return lastError; }
+    public void setLastError(String lastError) { this.lastError = lastError; }
+    public String getErrorMessage() { return errorMessage; }
+    public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+    public String getArtifactsDir() { return artifactsDir; }
+    public void setArtifactsDir(String artifactsDir) { this.artifactsDir = artifactsDir; }
+    public List<StageHistoryEntry> getStageHistory() { return stageHistory; }
+    public void setStageHistory(List<StageHistoryEntry> stageHistory) { this.stageHistory = stageHistory; }
+    public LocalDateTime getCreatedAt() { return createdAt; }
+    public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
+    public LocalDateTime getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; }
+    public long getVersion() { return version; }
+}
