@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -221,6 +222,53 @@ class WorkspaceManagerTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("中止");
         assertThat(ws).exists(); // 树未动
+        assertThat(ws.resolve("src/engine/engine.ts")).exists();
+    }
+
+    @Test
+    @DisplayName("F3 自愈：rmdir 首次 EPERM（句柄滞留）→ 有界重试第二次成功，恰调 2 次、树删净、模板本体无伤")
+    void cleanup_rmdirTransientEperm_retriedToSuccess() throws Exception {
+        WorkspaceManager mgr = manager();
+        Path ws = mgr.create("7", content, meta, lineWavs());
+        runner.calls.clear();
+        AtomicInteger rmdirs = new AtomicInteger();
+        runner.onRmdir(call -> {
+            if (rmdirs.incrementAndGet() == 1) {
+                // T12 job1 实证形态：QA stills 子进程句柄未放，rmdir node_modules 撞 EPERM
+                return new ProcessResult(1, "",
+                        "EPERM: operation not permitted, rmdir 'workspace\\7\\node_modules\\.'", false);
+            }
+            try {
+                Files.deleteIfExists(Path.of(call.command().get(3)));   // 第二次起模拟真实拆除
+            } catch (IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+            return new ProcessResult(0, "", "", false);
+        });
+
+        org.assertj.core.api.Assertions.assertThatCode(() -> mgr.cleanup("7"))
+                .doesNotThrowAnyException();
+
+        assertThat(rmdirs.get()).isEqualTo(2);          // 失败一次后重试成功
+        assertThat(runner.calls).hasSize(2);            // 且无其他命令（不会跳过 rmdir 直接删树）
+        assertThat(ws).doesNotExist();                  // 删净
+        assertThat(templateDir.resolve("node_modules/react/index.js")).exists();   // 模板本体无伤
+    }
+
+    @Test
+    @DisplayName("F3 界限：rmdir 连续失败 → 恰 3 次尝试后仍 IllegalStateException 中止删树（防御不因重试放宽）")
+    void cleanup_rmdirPersistentFailure_boundedRetriesThenAbort() throws Exception {
+        WorkspaceManager mgr = manager();
+        Path ws = mgr.create("7", content, meta, lineWavs());
+        runner.calls.clear();
+        runner.onRmdir(call -> new ProcessResult(1, "", "目录不是空的。", false));
+
+        assertThatThrownBy(() -> mgr.cleanup("7"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("中止")
+                .hasMessageContaining("3 次");
+        assertThat(runner.calls).hasSize(3);   // 有界：不无限重试
+        assertThat(ws).exists();               // 树未动（sim-001 防御保持）
         assertThat(ws.resolve("src/engine/engine.ts")).exists();
     }
 

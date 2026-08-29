@@ -3,6 +3,8 @@ package com.wyf.factory.render;
 import com.wyf.factory.config.AppProperties;
 import com.wyf.factory.content.ContentJson;
 import com.wyf.factory.tts.AudioMeta;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -28,7 +30,8 @@ import java.util.stream.Stream;
  *
  * <p>拆除防御（sim-001 教训：删树穿越 junction 会删掉 template/node_modules 本体）：
  * cleanup 恒先 {@code cmd /c rmdir} 拆 junction（rmdir 对 junction 恰好只拆链接不碰目标），
- * rmdir 失败或拆后 node_modules 仍在 → 中止抛 IllegalStateException，绝不删树；
+ * rmdir 瞬态失败（EPERM/句柄滞留）先做 {@value #DELETE_MAX_ATTEMPTS} 次有界重试（T12 F3 自愈），
+ * 仍失败或拆后 node_modules 仍在 → 中止抛 IllegalStateException，绝不删树；
  * 删树途中再遇 node_modules 直接抛（正常流程到不了这里，纯保险）。</p>
  */
 @Component
@@ -38,6 +41,13 @@ public class WorkspaceManager {
     private static final Set<String> EXCLUDED_DIRS = Set.of("out", "node_modules", "data", ".git");
 
     private static final Duration LINK_COMMAND_TIMEOUT = Duration.ofSeconds(30);
+
+    /** 删除侧瞬态失败（EPERM/句柄滞留，T12 F3：QA stills 子进程未放句柄）的最大尝试次数。 */
+    static final int DELETE_MAX_ATTEMPTS = 3;
+    /** 首次重试退避毫秒数（按尝试次数递增：500ms、1s）。 */
+    static final long DELETE_BACKOFF_MILLIS = 500L;
+
+    private static final Logger log = LoggerFactory.getLogger(WorkspaceManager.class);
 
     private final ProcessRunner runner;
     private final AppProperties props;
@@ -80,7 +90,8 @@ public class WorkspaceManager {
 
     /**
      * 整删工作区。顺序硬性：junction 存在则先 {@code cmd /c rmdir}（只拆链接不删目标），
-     * 失败/拆后仍在 → 抛 IllegalStateException 中止；随后才递归删树。
+     * 有界重试（{@value #DELETE_MAX_ATTEMPTS} 次）仍失败/拆后仍在 → 抛 IllegalStateException 中止；
+     * 随后才递归删树（删树本身同样有界重试——QA stills 子进程句柄滞留的 EPERM 属瞬态，T12 F3）。
      */
     public void cleanup(String jobId) throws InterruptedException {
         Path ws = workspacePath(jobId);
@@ -89,15 +100,58 @@ public class WorkspaceManager {
         }
         Path junction = ws.resolve("node_modules");
         if (Files.exists(junction)) {
+            removeJunctionWithRetry(junction);
+        }
+        deleteTreeWithRetry(ws);
+    }
+
+    /**
+     * {@code cmd /c rmdir} 拆 junction，瞬态失败（timedOut/exit!=0/拆后仍在）按
+     * {@value #DELETE_BACKOFF_MILLIS}ms×尝试次数退避重试，耗尽仍败 → IllegalStateException
+     * 中止删树（sim-001 防御：绝不带着未拆净的 junction 删树）。不按 stderr 内容过滤：
+     * Windows 下句柄滞留的报错形态多样（EPERM/拒绝访问/目录不是空的），一律当瞬态有界重试。
+     */
+    private void removeJunctionWithRetry(Path junction) throws InterruptedException {
+        ProcessResult last = null;
+        for (int attempt = 1; attempt <= DELETE_MAX_ATTEMPTS; attempt++) {
             ProcessResult r = runner.run(workspaceRoot(),
                     List.of("cmd", "/c", "rmdir", absolute(junction)), Map.of(), LINK_COMMAND_TIMEOUT);
-            if (r.timedOut() || r.exitCode() != 0 || Files.exists(junction)) {
-                throw new IllegalStateException("junction 拆除失败（exit=" + r.exitCode()
-                        + " stderr=" + brief(r.stderr()) + "），中止删树以防误删 template/node_modules 本体："
-                        + junction);
+            if (!r.timedOut() && r.exitCode() == 0 && !Files.exists(junction)) {
+                return;
+            }
+            last = r;
+            log.warn("junction 拆除第 {}/{} 次失败（exit={} stderr={}），稍后重试：{}",
+                    attempt, DELETE_MAX_ATTEMPTS, r.exitCode(), brief(r.stderr()), junction);
+            if (attempt < DELETE_MAX_ATTEMPTS) {
+                Thread.sleep(DELETE_BACKOFF_MILLIS * attempt);
             }
         }
-        deleteTree(ws);
+        throw new IllegalStateException("junction 拆除失败（" + DELETE_MAX_ATTEMPTS + " 次尝试，exit="
+                + last.exitCode() + " stderr=" + brief(last.stderr()) + "），中止删树以防误删"
+                + " template/node_modules 本体：" + junction);
+    }
+
+    /**
+     * 删树有界重试：Windows 句柄滞留（如 QA stills 子进程仍持 workspace 内文件）表现为
+     * 瞬态 FileSystemException（EPERM/拒绝访问）→ 退避重试；部分删除后重跑安全
+     * （walkFileTree 从现存部分重新遍历）。防御性 IllegalStateException（删树途中撞见
+     * junction，未拆净）不重试、立即抛。耗尽仍败按最后一次的 UncheckedIOException 抛出。
+     */
+    private void deleteTreeWithRetry(Path ws) throws InterruptedException {
+        for (int attempt = 1; attempt <= DELETE_MAX_ATTEMPTS; attempt++) {
+            try {
+                deleteTree(ws);
+                return;
+            } catch (UncheckedIOException e) {
+                if (attempt == DELETE_MAX_ATTEMPTS) {
+                    throw e;
+                }
+                log.warn("workspace 删树第 {}/{} 次失败（{}），退避 {}ms 后重试：{}",
+                        attempt, DELETE_MAX_ATTEMPTS, e.getMessage(),
+                        DELETE_BACKOFF_MILLIS * attempt, ws);
+                Thread.sleep(DELETE_BACKOFF_MILLIS * attempt);
+            }
+        }
     }
 
     private Path workspaceRoot() {
