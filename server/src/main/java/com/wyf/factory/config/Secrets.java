@@ -1,6 +1,7 @@
 package com.wyf.factory.config;
 
 import com.wyf.factory.glm.GlmException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -24,11 +25,16 @@ public class Secrets {
     private final Path secretsFile;
 
     /** Spring 生产构造：真实环境变量 + 工作目录（server/）下的 secrets.local.yml。 */
+    @Autowired
     public Secrets() {
         this(System::getenv, Path.of("secrets.local.yml"));
     }
 
-    /** 测试构造：env 读取抽象成 Function 注入（反射设 fake env 不可行）。 */
+    /**
+     * 测试构造：env 读取抽象成 Function 注入（反射设 fake env 不可行）。
+     * 保持 public：glm/render/tts 三个包的切片测试都要用，收 package-private 会跨包编译失败；
+     * Spring 择一歧义已由生产构造器的 {@code @Autowired} 消除（ContextLoadsTest 守卫）。
+     */
     public Secrets(Function<String, String> envLookup, Path secretsFile) {
         this.envLookup = envLookup;
         this.secretsFile = secretsFile;

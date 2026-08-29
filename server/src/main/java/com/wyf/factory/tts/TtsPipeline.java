@@ -4,6 +4,7 @@ import com.wyf.factory.config.AppProperties;
 import com.wyf.factory.content.ContentJson;
 import com.wyf.factory.glm.GlmException;
 import com.wyf.factory.render.TimelineCalc;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -62,12 +63,14 @@ public class TtsPipeline {
     private final AppProperties props;
     private final Sleeper sleeper;
 
+    /** Spring 生产构造（唯一 @Autowired 构造器，真 sleep）。 */
+    @Autowired
     public TtsPipeline(DashScopeTts tts, AppProperties props) {
         this(tts, props, Sleeper.SYSTEM);
     }
 
-    /** 测试构造：注入 fake sleep。 */
-    public TtsPipeline(DashScopeTts tts, AppProperties props, Sleeper sleeper) {
+    /** 测试构造（包内可见防 Spring 误选）：注入 fake sleep。 */
+    TtsPipeline(DashScopeTts tts, AppProperties props, Sleeper sleeper) {
         this.tts = tts;
         this.props = props;
         this.sleeper = sleeper;

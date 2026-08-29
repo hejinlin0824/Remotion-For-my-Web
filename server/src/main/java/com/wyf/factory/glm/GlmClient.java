@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.wyf.factory.config.AppProperties;
 import com.wyf.factory.config.Secrets;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -44,12 +45,14 @@ public class GlmClient {
     private final long backoffBaseMillis;
     private final ObjectMapper mapper = new ObjectMapper();
 
+    /** Spring 生产构造（唯一 @Autowired 构造器，全上下文装配走这里）。 */
+    @Autowired
     public GlmClient(HttpTransport transport, Secrets secrets, AppProperties props) {
         this(transport, secrets, props, DEFAULT_BACKOFF_BASE_MILLIS);
     }
 
-    /** 测试构造：注入退避基数（毫秒），单测传 1 不等真退避。 */
-    public GlmClient(HttpTransport transport, Secrets secrets, AppProperties props, long backoffBaseMillis) {
+    /** 测试构造（包内可见防 Spring 误选）：注入退避基数（毫秒），单测传 1 不等真退避。 */
+    GlmClient(HttpTransport transport, Secrets secrets, AppProperties props, long backoffBaseMillis) {
         this.transport = transport;
         this.secrets = secrets;
         this.props = props;

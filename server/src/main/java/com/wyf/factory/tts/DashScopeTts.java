@@ -7,6 +7,7 @@ import com.wyf.factory.config.AppProperties;
 import com.wyf.factory.config.Secrets;
 import com.wyf.factory.glm.GlmException;
 import com.wyf.factory.glm.HttpTransport;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -58,15 +59,16 @@ public class DashScopeTts {
     private final AtomicLong rateLimitEvents = new AtomicLong();
     private final ObjectMapper mapper = new ObjectMapper();
 
-    /** 生产构造：JDK HttpClient 下载音频、真退避。 */
+    /** Spring 生产构造（唯一 @Autowired 构造器）：JDK HttpClient 下载音频、真退避。 */
+    @Autowired
     public DashScopeTts(HttpTransport transport, Secrets secrets, AppProperties props) {
         this(transport, secrets, props, DEFAULT_BACKOFF_BASE_MILLIS, TtsPipeline.Sleeper.SYSTEM,
                 new JdkAudioFetcher());
     }
 
-    /** 测试构造：注入退避基数/睡眠/音频下载（单测零等待、零网络）。 */
-    public DashScopeTts(HttpTransport transport, Secrets secrets, AppProperties props,
-                        long backoffBaseMillis, TtsPipeline.Sleeper sleeper, AudioFetcher audioFetcher) {
+    /** 测试构造（包内可见防 Spring 误选）：注入退避基数/睡眠/音频下载（单测零等待、零网络）。 */
+    DashScopeTts(HttpTransport transport, Secrets secrets, AppProperties props,
+                 long backoffBaseMillis, TtsPipeline.Sleeper sleeper, AudioFetcher audioFetcher) {
         this.transport = transport;
         this.secrets = secrets;
         this.backoffBaseMillis = backoffBaseMillis;
