@@ -24,10 +24,14 @@ for (const sc of content.scenes) {
 const act5Start = t - BREATH;
 const total = act5Start + Math.round((meta.fixed.act5.durationSec + (meta.act5TailSec ?? 2.0)) * FPS);
 
+// 章节字采样偏移：ChapterTitle.tsx 内内容分三段入场——蓝块扫入 [0,12]、标题 spring(f=12 起 16 帧→28)、
+// 下划线 bar [14,34]；f=34 起内容全部就位，扫出始于 CHAPTER_F-12=42。旧偏移 +12 落在纯色蓝块中段
+// （标题透明度≈0），QA 误报「整帧纯色无内容」（T11 冒烟实证）。
+const CHAPTER_REVEAL_F = 34; // = ChapterTitle.tsx 入场动画完成帧（12+16 spring / bar 至 34）
 const rows = [["act1-中段", Math.round(act1Dur * 0.5)]];
 const act2K = wins.find((w) => w.act === 2 && w.component === "knowledge-card");
-rows.push(["act2-章节字", act2K.start + 12]);
-for (const act of [3, 4]) rows.push([`act${act}-章节字`, wins.find((w) => w.act === act).start + 12]);
+rows.push(["act2-章节字", act2K.start + CHAPTER_REVEAL_F]);
+for (const act of [3, 4]) rows.push([`act${act}-章节字`, wins.find((w) => w.act === act).start + CHAPTER_REVEAL_F]);
 for (const w of wins) rows.push([`s-${w.id}-${w.component}`, w.start + Math.round(w.dur * 0.55)]);
 rows.push(["act5-打字机", act5Start + Math.round(meta.fixed.act5.durationSec * FPS * 0.6)]);
 rows.push(["act5-定格末尾", total - 8]);
