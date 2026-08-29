@@ -305,7 +305,7 @@ class JobsControllerTest {
     }
 
     @Test
-    @DisplayName("DELETE 取消结果 NOT_CANCELLABLE（SPEAKING 及之后非终态）→ 409 {error}")
+    @DisplayName("DELETE 取消结果 NOT_CANCELLABLE（SPEAKING：TTS 中途不可取消）→ 409 {error}")
     void delete_conflict_returns409() throws Exception {
         when(service.cancel("j1")).thenReturn(JobService.CancelResult.NOT_CANCELLABLE);
 
@@ -436,7 +436,7 @@ class JobsControllerTest {
         }
 
         @Test
-        @DisplayName("cancel SPEAKING/RENDERING/QA（SPEAKING 及之后非终态）→ NOT_CANCELLABLE，不落库")
+        @DisplayName("cancel SPEAKING → NOT_CANCELLABLE（TTS 中途取消浪费已合成批次），不落库")
         void cancel_speaking_rejected() {
             Job job = new Job();
             job.setInputType("TEXT");
@@ -445,6 +445,38 @@ class JobsControllerTest {
 
             assertThat(realService.cancel(job.getId())).isEqualTo(JobService.CancelResult.NOT_CANCELLABLE);
             verify(repo, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("cancel RENDERING → ACCEPTED，且落库 cancelRequested=true（编排器渲染后收割）")
+        void cancel_rendering_marksCancelRequested() {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            job.setStatus(JobStatus.RENDERING);
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+            when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            assertThat(realService.cancel(job.getId())).isEqualTo(JobService.CancelResult.ACCEPTED);
+
+            ArgumentCaptor<Job> captor = ArgumentCaptor.forClass(Job.class);
+            verify(repo).save(captor.capture());
+            assertThat(captor.getValue().isCancelRequested()).isTrue();
+        }
+
+        @Test
+        @DisplayName("cancel QA → ACCEPTED，且落库 cancelRequested=true（编排器 QA 后收割）")
+        void cancel_qa_marksCancelRequested() {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            job.setStatus(JobStatus.QA);
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+            when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            assertThat(realService.cancel(job.getId())).isEqualTo(JobService.CancelResult.ACCEPTED);
+
+            ArgumentCaptor<Job> captor = ArgumentCaptor.forClass(Job.class);
+            verify(repo).save(captor.capture());
+            assertThat(captor.getValue().isCancelRequested()).isTrue();
         }
 
         @Test

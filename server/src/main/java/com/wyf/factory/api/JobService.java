@@ -67,10 +67,12 @@ public class JobService {
     }
 
     /**
-     * 取消判定（spec §11：SPEAKING 前可取消，终态幂等）：
+     * 取消判定（spec §11 修订：取消放宽至 RENDERING/QA，终态幂等）：
      * <ul>
-     *   <li>QUEUED/EXTRACTING/GENERATING/REVIEWING → 置 cancelRequested=true 落库 → ACCEPTED（202）；</li>
-     *   <li>SPEAKING/RENDERING/QA（SPEAKING 及之后非终态）→ NOT_CANCELLABLE（409）；</li>
+     *   <li>QUEUED/EXTRACTING/GENERATING/REVIEWING/RENDERING/QA → 置 cancelRequested=true 落库 →
+     *       ACCEPTED（202）。RENDERING/QA 只置标记，由编排器在渲染/QA 工位完成后收割
+     *       （成片丢弃不入库 + 终态 CANCELLED）；</li>
+     *   <li>SPEAKING → NOT_CANCELLABLE（409）：TTS 中途取消会浪费已合成批次，语义上不允许；</li>
      *   <li>DONE/FAILED/CANCELLED → ALREADY_TERMINAL（200 幂等）；</li>
      *   <li>id 不存在 → NOT_FOUND（404）。</li>
      * </ul>
@@ -82,12 +84,12 @@ public class JobService {
         }
         Job job = found.get();
         return switch (job.getStatus()) {
-            case QUEUED, EXTRACTING, GENERATING, REVIEWING -> {
+            case QUEUED, EXTRACTING, GENERATING, REVIEWING, RENDERING, QA -> {
                 job.setCancelRequested(true);
                 repo.save(job);
                 yield CancelResult.ACCEPTED;
             }
-            case SPEAKING, RENDERING, QA -> CancelResult.NOT_CANCELLABLE;
+            case SPEAKING -> CancelResult.NOT_CANCELLABLE;
             case DONE, FAILED, CANCELLED -> CancelResult.ALREADY_TERMINAL;
         };
     }
