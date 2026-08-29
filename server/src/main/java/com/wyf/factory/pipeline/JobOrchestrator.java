@@ -566,10 +566,25 @@ public class JobOrchestrator {
         if (job.getQaRounds() < props.getQa().getMaxRounds()) {
             job.setQaRounds(job.getQaRounds() + 1);
             job.setLastError(tail(fails, LAST_ERROR_TAIL));
+            discardStaleFinalQuietly(job);
             return enterAndSaveAndReturn(job, JobStatus.RENDERING,
                     "QA 未过（第 " + job.getQaRounds() + " 轮），全片重渲染");
         }
         return failJob(job, "QA 审帧 " + props.getQa().getMaxRounds() + " 轮未过：" + fails, null, ctx);
+    }
+
+    /**
+     * QA 重渲前丢弃上轮被判废的成片（golden 2026-08-29 实测 bug）：doRendering 入口以
+     * {@code final.mp4 已在盘} 判定断点续跑跳过渲染，不删旧片则「全片重渲染」永不发生，
+     * QA 逐轮复审同一批废帧直至预算耗尽（QA 重试机制整体空转）。
+     */
+    private void discardStaleFinalQuietly(Job job) {
+        try {
+            Files.deleteIfExists(artifactsFinal(job.getId()));
+        } catch (IOException e) {
+            log.warn("job={} QA 重渲前丢弃旧成片失败（残留文件 {}）：{}", job.getId(),
+                    artifactsFinal(job.getId()), e.getMessage());
+        }
     }
 
     // ------------------------------------------------------------------ 落库与回调
