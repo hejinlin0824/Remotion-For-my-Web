@@ -44,6 +44,7 @@
 - **F2（验收主因）QA 单轮延迟 17.6-57.2min**：17 帧 stills（npx remotion still 逐帧拉起）+ 逐帧 GLM judge（含退避重试）+ QA 信号量=1 三 job 串行；叠加每轮全片重渲 16-19min。三题 batch 即使 QA 全一次过也需 ~75-95min，任何一轮驳回即突破 100min 看门狗。**建议**（供裁决）：QA 信号量提并发 / stills 批量化 / judge 并发化 / 或验收看门狗按轮数而非墙钟。
 - **F3 job1 渲染 EPERM 一次**：`渲染失败 exit=1：EPERM: operation not permitted, rmdir 'workspace\9fabbdf8…\node_modules\.'`（qa=1 计入），就地重渲后自愈。疑为 QA stills 子进程仍持 node_modules 句柄时 workspace 拆除/重建撞车。
 - **F4 stageHistory 完整性缺口（仅 job1）**：00:14 QA→RENDERING 与 00:41 RENDERING→QA 两次迁移（30s 轮询证实发生）无对应 history 条目；其余全部 25 条迁移均有条目。疑与乐观锁重读（saveTolerant 丢弃内存态追加）或就地重渲不写 history 有关，待代码层面定位。
+  【**2026-08-30 更正：经 T13c 三方复核确认为误报**】polls.tsv 中 job1 的 RENDERING 恰 37 行（23:54:06→00:12:07）连续零夹行；timeline.txt 证 QA→RENDERING 00:25:38 属 **job2**（本报告误记为 job1）；final-9fabbdf8.json 的 updatedAt（00:12:29.939）与最后一条 history 时间戳精确相等且 qaRounds=1——若 00:14/00:41 迁移为真则必有第二条 ENTER 且 updatedAt≈00:41。**结论：job1 从未发生 QA↔RENDERING 往返，「RENDERING→RENDERING 就地重渲不落 history」为设计行为**，回归测试已由 commit 43024ff 固化。
 - **F5（minor）video 端点无状态门禁**：非 DONE 期间只要 final.mp4 在盘即 200（job1 在 QA 中返回第一轮旧片）。看 `JobService.videoPath:98` 按文件存在性判定。
 - **运维记录**：轮询/采样后台 shell 两次被会话收割（服务 JVM 孤儿存活不受影响，前台轮询续采）；H2 旧库移至 `server/target/e2e/h2-backup/`（未删）；收尾已 taskkill 本任务全部 java/node 进程树，8080 释放；4 个 06:0x 的 sim-001 `remotion render --help` 残留 node 进程系本任务开始前已存在，未动。
 
