@@ -26,6 +26,8 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -179,6 +181,28 @@ public class JobOrchestrator {
         submit(job.getId());
     }
 
+    /**
+     * 启动 sweep（修复轮 M1）：服务（重启）就绪后把全部非终态任务重新提交推进，
+     * 与 workspace/artifacts 断点产物协同实现断点续跑。
+     * QUEUED 不在此提交——那是 poll 的领单范围（2s 内被领），重复提交会双跑同一单。
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void resumeInterrupted() {
+        List<Job> unfinished = repo.findByStatusNotIn(
+                List.of(JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELLED));
+        int resumed = 0;
+        for (Job job : unfinished) {
+            // QUEUED 留给 poll 领单（重复提交会双跑）；终态防御性跳过（查询本不该返回）
+            if (job.getStatus() == JobStatus.QUEUED || job.getStatus().isTerminal()) {
+                continue;
+            }
+            log.info("job={} 启动续跑（status={}）", job.getId(), job.getStatus());
+            submit(job.getId());
+            resumed++;
+        }
+        log.info("启动 sweep：非终态任务 {} 个，续跑提交 {} 个", unfinished.size(), resumed);
+    }
+
     /** 单任务的一条处理线程（poll 领单后提交；执行器缺位时同步兜底，绝不让任务悬挂）。 */
     private void submit(String jobId) {
         Executor executor = this.jobExecutor;
@@ -198,7 +222,8 @@ public class JobOrchestrator {
     // ------------------------------------------------------------------ 主流程
 
     /**
-     * 全流程推进：按 DB 当前 status 从断点阶段继续（服务重启安全，可从任意非终态进入）。
+     * 全流程推进：按 DB 当前 status 从断点阶段继续（服务重启安全，可从任意非终态进入；
+     * 启动入口见 {@link #resumeInterrupted()}）。
      * 阶段间每轮重读最新行做取消检查点；任何未分类异常兜底转 FAILED，绝不让任务悬挂非终态。
      */
     public void process(String id) {
@@ -211,6 +236,8 @@ public class JobOrchestrator {
         try {
             loop(job, ctx);
         } catch (InterruptedException interrupted) {
+            // 修复轮 I4：中断（executor 关闭/停机）不置 FAILED——保持当前阶段状态原样，
+            // 恢复中断标志后安全返回；启动 sweep 重启后从断点自然续跑
             Thread.currentThread().interrupt();
             log.warn("job={} 推进被中断，保持状态 {} 等待断点续跑", id, job.getStatus(), interrupted);
         } catch (RuntimeException unclassified) {
@@ -219,7 +246,8 @@ public class JobOrchestrator {
                 String message = unclassified.getMessage() != null
                         ? unclassified.getMessage()
                         : unclassified.getClass().getSimpleName();
-                failJob(fresh, "未分类失败：" + message, unclassified);
+                failJob(fresh, "未分类失败：" + message, unclassified, ctx);
+                fireCallback(ctx);
             } else {
                 log.error("job={} 推进异常（已终态或行缺失，仅记录）", id, unclassified);
             }
@@ -231,13 +259,16 @@ public class JobOrchestrator {
             Job fresh = repo.findById(job.getId()).orElse(null);
             if (fresh == null) {
                 log.warn("job={} 行消失（被删除），停止推进", job.getId());
+                fireCallback(ctx);
                 return;
             }
             job = fresh;
-            // 取消检查点（每阶段开始前）：SPEAKING 前可取消；SPEAKING 起标记被忽略、继续至终态
+            // 取消检查点（每阶段开始前）：SPEAKING 前阶段间可取消；
+            // RENDERING/QA 完成后的检查点在 doRendering/doQa 内（成片丢弃）
             if (job.isCancelRequested() && JobStatus.canTransit(job.getStatus(), JobStatus.CANCELLED)) {
-                job = doCancel(job);
+                job = doCancel(job, ctx);
                 if (job == null || job.getStatus().isTerminal()) {
+                    fireCallback(ctx);
                     return;
                 }
                 continue;
@@ -251,13 +282,16 @@ public class JobOrchestrator {
                 case RENDERING -> job = doRendering(job, ctx);
                 case QA -> job = doQa(job, ctx);
                 default -> {
+                    fireCallback(ctx);
                     return;
                 }
             }
             if (job == null) {
+                fireCallback(ctx);
                 return;
             }
         }
+        fireCallback(ctx);   // 循环条件退出（已是终态）——补发挂起回调
     }
 
     // ------------------------------------------------------------------ 阶段：EXTRACTING
@@ -277,9 +311,9 @@ public class JobOrchestrator {
             return enterAndSave(job, JobStatus.GENERATING, "审题完成（" + extracted.problemType() + "）");
         } catch (ExtractStation.FatalExtractException fatal) {
             // 读不出题/非数学题：同素材重试无意义（spec §9），直接判死
-            return failJob(job, fatal.getMessage(), fatal);
+            return failJob(job, fatal.getMessage(), fatal, ctx);
         } catch (GlmException e) {
-            return retryOrFail(job, e, "审题", job.getExtractRetries(), job::setExtractRetries);
+            return retryOrFail(job, e, "审题", job.getExtractRetries(), job::setExtractRetries, ctx);
         }
     }
 
@@ -299,7 +333,7 @@ public class JobOrchestrator {
                     ? "素材+剧本生成完成"
                     : "驳回重生成完成（错误清单已回传，共 " + errors.size() + " 条）");
         } catch (GlmException e) {
-            return retryOrFail(job, e, "内容生成", job.getGenRetries(), job::setGenRetries);
+            return retryOrFail(job, e, "内容生成", job.getGenRetries(), job::setGenRetries, ctx);
         }
     }
 
@@ -307,7 +341,7 @@ public class JobOrchestrator {
 
     private Job doReviewing(Job job, Ctx ctx) {
         if (ctx.content == null) {
-            return failJob(job, "REVIEWING 时 content 缺失（内部状态不一致）", null);
+            return failJob(job, "REVIEWING 时 content 缺失（内部状态不一致）", null, ctx);
         }
         if (ctx.extracted == null) {
             // 断点续跑：ExtractResult 不可恢复，V2 以 content.json problem 段为基准（记录 note）
@@ -323,7 +357,7 @@ public class JobOrchestrator {
             ValidationResult r4 = semaphores.withGlm(() -> v4.validate(vctx));
             merged = ValidationResult.merge(r1, r2, r3, r4);
         } catch (GlmException e) {
-            return retryOrFail(job, e, "V4 语义审核", job.getReviewRetries(), job::setReviewRetries);
+            return retryOrFail(job, e, "V4 语义审核", job.getReviewRetries(), job::setReviewRetries, ctx);
         }
         if (merged.pass()) {
             return enterAndSave(job, JobStatus.SPEAKING, ctx.extractedFromResume
@@ -341,11 +375,14 @@ public class JobOrchestrator {
         if (used < props.getRetry().getContentMax()) {
             job.setReviewRetries(used + 1);
             ctx.reviewErrors = List.copyOf(errors);
+            // 修复轮 I1：清除断点续跑标记——下一轮 GENERATING 必须真正重生成，
+            // 否则续跑场景下 ctx.content 恒非空会被误判为"已在盘"而永不重生成
+            ctx.contentResumed = false;
             job.setLastError(tail(String.join("; ", errors), LAST_ERROR_TAIL));
             return enterAndSave(job, JobStatus.GENERATING,
                     "V1-V4 驳回（第 " + (used + 1) + " 轮），错误清单回传重生成");
         }
-        return failJob(job, "内容校验连续驳回 " + used + " 轮未过：" + String.join("; ", errors), null);
+        return failJob(job, "内容校验连续驳回 " + used + " 轮未过：" + String.join("; ", errors), null, ctx);
     }
 
     // ------------------------------------------------------------------ 阶段：SPEAKING
@@ -367,7 +404,7 @@ public class JobOrchestrator {
             return enterAndSave(job, JobStatus.RENDERING, "TTS 完成（" + meta.getLines().size() + " 句）");
         } catch (TtsPipeline.TtsFatalException fatal) {
             // 某句全尝试 + 整批重录仍失败（Global Constraint 3），重试无意义
-            return failJob(job, fatal.getMessage(), fatal);
+            return failJob(job, fatal.getMessage(), fatal, ctx);
         } finally {
             deleteQuietly(staging);
         }
@@ -379,19 +416,24 @@ public class JobOrchestrator {
         if (Files.isRegularFile(artifactsFinal(job.getId()))) {
             return enterAndSave(job, JobStatus.QA, "断点续跑：final.mp4 已在盘，跳过渲染");
         }
-        // 协作者声明 InterruptedException，无法进 Supplier：手动 acquire/release（一次一闸，无嵌套）
+        // 协作者声明 InterruptedException，无法进 Supplier：手动 acquire/release（一次一闸，无嵌套）。
+        // 渲染进行中不打断（spec §11）；完成后的取消检查点在闸外（M2）
         semaphores.render().acquire();
         try {
             Path ws = workspaceManager.create(job.getId(), ctx.content, ctx.audioMeta, ctx.lineWavs);
             ctx.workspace = ws;
             Path mp4 = renderWorker.render(ws);   // 全片渲染（QA 轮次重渲同样走这里，不复用短渲）
             ctx.artifactsDir = mp4.getParent();
-            return enterAndSave(job, JobStatus.QA, "渲染完成，进入审帧 QA");
         } catch (RenderWorker.RenderException e) {
-            return renderRetryOrFail(job, e);
+            // failJob 只落库+挂起回调，notify 在 loop 层（闸外）执行——I3
+            return renderRetryOrFail(job, e, ctx);
         } finally {
             semaphores.render().release();
         }
+        if (job.isCancelRequested()) {
+            return cancelAfterWork(job, ctx);   // M2：渲染完成后检查点 → CANCELLED + 成片丢弃
+        }
+        return enterAndSave(job, JobStatus.QA, "渲染完成，进入审帧 QA");
     }
 
     // ------------------------------------------------------------------ 阶段：QA
@@ -399,17 +441,21 @@ public class JobOrchestrator {
     private Job doQa(Job job, Ctx ctx) throws InterruptedException {
         Path ws = ctx.workspace != null ? ctx.workspace : workspaceManager.workspacePath(job.getId());
         semaphores.qa().acquire();
+        QaFrameCheck.QaResult result;
         try {
-            QaFrameCheck.QaResult result = qaFrameCheck.check(ws);
-            if (result.pass()) {
-                return finishDone(job, ctx, result.framesChecked());
-            }
-            return qaRetryOrFail(job, result);
+            result = qaFrameCheck.check(ws);
         } catch (RenderWorker.RenderException e) {
-            return renderRetryOrFail(job, e);
+            return renderRetryOrFail(job, e, ctx);
         } finally {
             semaphores.qa().release();
         }
+        if (job.isCancelRequested()) {
+            return cancelAfterWork(job, ctx);   // M2：QA 完成后检查点（即使审帧通过也不 DONE）
+        }
+        if (result.pass()) {
+            return finishDone(job, ctx, result.framesChecked());
+        }
+        return qaRetryOrFail(job, result, ctx);
     }
 
     // ------------------------------------------------------------------ 终态收尾
@@ -423,11 +469,12 @@ public class JobOrchestrator {
         job.enterStage(JobStatus.DONE, "QA 通过（" + framesChecked + " 帧），成片归档");
         saveTolerant(job);
         cleanupWorkspaceQuietly(job.getId());
-        callback(job, JobStatus.DONE, null);
+        deferCallback(job, JobStatus.DONE, null, ctx);   // I3：闸外发（loop 层）
         return null;
     }
 
-    private Job doCancel(Job job) {
+    private Job doCancel(Job job, Ctx ctx) {
+        JobStatus before = job.getStatus();
         log.info("job={} 取消生效（原阶段 {}）", job.getId(), job.getStage());
         job.enterStage(JobStatus.CANCELLED, "用户取消");
         Job saved = saveTolerant(job);
@@ -437,19 +484,42 @@ public class JobOrchestrator {
         if (saved.getStatus() != JobStatus.CANCELLED) {
             return saved;   // TOCTOU：CANCELLED 写入被并发落库顶掉 → 以库内最新状态继续，下轮检查点再来
         }
+        if (before == JobStatus.RENDERING || before == JobStatus.QA) {
+            discardArtifactsQuietly(job.getId());   // M2：渲染/审帧阶段取消 → 丢弃残留成片
+        }
         cleanupWorkspaceQuietly(job.getId());
-        callback(job, JobStatus.CANCELLED, null);
+        deferCallback(job, JobStatus.CANCELLED, null, ctx);
         return null;
     }
 
-    private Job failJob(Job job, String message, Throwable cause) {
+    /**
+     * 渲染/QA 完成后的取消检查点（修复轮 M2）：成片已产出 → 丢弃不入 artifacts
+     * （删除 artifacts/{jobId}/final.mp4），清理工作区，回调 CANCELLED。
+     */
+    private Job cancelAfterWork(Job job, Ctx ctx) {
+        log.info("job={} 渲染/审帧完成发现取消标记 → CANCELLED（成片丢弃）", job.getId());
+        job.enterStage(JobStatus.CANCELLED, "用户取消（渲染/QA 完成后检查点，成片丢弃）");
+        Job saved = saveTolerant(job);
+        if (saved == null) {
+            return null;
+        }
+        if (saved.getStatus() != JobStatus.CANCELLED) {
+            return saved;   // TOCTOU → 循环以最新状态重查
+        }
+        discardArtifactsQuietly(job.getId());
+        cleanupWorkspaceQuietly(job.getId());
+        deferCallback(job, JobStatus.CANCELLED, null, ctx);
+        return null;
+    }
+
+    private Job failJob(Job job, String message, Throwable cause, Ctx ctx) {
         log.warn("job={} → FAILED：{}", job.getId(), message);
         job.setErrorMessage(message);
         job.setLastError(cause != null ? tail(stackTraceOf(cause), LAST_ERROR_TAIL)
                 : tail(String.valueOf(message), LAST_ERROR_TAIL));
         job.enterStage(JobStatus.FAILED, brief(message));
         saveTolerant(job);
-        callback(job, JobStatus.FAILED, message);
+        deferCallback(job, JobStatus.FAILED, message, ctx);
         return null;
     }
 
@@ -459,7 +529,7 @@ public class JobOrchestrator {
      * 可重试异常的预算判定：未到上限就地重试（留在原状态，循环重跑本阶段），到顶 FAILED。
      * 阶段内瞬态退避已由 glm/tts 客户端内置，这里只管跨尝试预算。
      */
-    private Job retryOrFail(Job job, RuntimeException e, String stage, int used, IntConsumer setUsed) {
+    private Job retryOrFail(Job job, RuntimeException e, String stage, int used, IntConsumer setUsed, Ctx ctx) {
         int max = props.getRetry().getContentMax();
         if (used < max) {
             setUsed.accept(used + 1);
@@ -467,14 +537,18 @@ public class JobOrchestrator {
             saveTolerant(job);
             return job;
         }
-        return failJob(job, stage + "重试 " + used + " 次预算耗尽：" + e.getMessage(), e);
+        return failJob(job, stage + "重试 " + used + " 次预算耗尽：" + e.getMessage(), e, ctx);
     }
 
     /**
      * 渲染/QA 链失败预算：与 QA 轮次共用 qaRounds（画面类失败与审帧同属"渲染-审帧"循环，
      * 上限 app.qa.maxRounds）。RENDERING 中就地重渲；QA 中回退 RENDERING（canTransit QA→RENDERING）。
+     * 修复轮 I2：!isRetryable 的渲染异常（配置/内容性失败）直接 FAILED，不进循环。
      */
-    private Job renderRetryOrFail(Job job, RenderWorker.RenderException e) {
+    private Job renderRetryOrFail(Job job, RenderWorker.RenderException e, Ctx ctx) {
+        if (!e.isRetryable()) {
+            return failJob(job, "渲染失败（不可重试）：" + e.getMessage(), e, ctx);
+        }
         if (job.getQaRounds() < props.getQa().getMaxRounds()) {
             job.setQaRounds(job.getQaRounds() + 1);
             job.setLastError(tail(String.valueOf(e.getMessage()), LAST_ERROR_TAIL));
@@ -484,10 +558,10 @@ public class JobOrchestrator {
             }
             return enterAndSave(job, JobStatus.RENDERING, "审帧链异常，回退重渲染");
         }
-        return failJob(job, "渲染/审帧链失败预算（" + props.getQa().getMaxRounds() + "）耗尽：" + e.getMessage(), e);
+        return failJob(job, "渲染/审帧链失败预算（" + props.getQa().getMaxRounds() + "）耗尽：" + e.getMessage(), e, ctx);
     }
 
-    private Job qaRetryOrFail(Job job, QaFrameCheck.QaResult result) {
+    private Job qaRetryOrFail(Job job, QaFrameCheck.QaResult result, Ctx ctx) {
         String fails = String.join("; ", result.fails());
         if (job.getQaRounds() < props.getQa().getMaxRounds()) {
             job.setQaRounds(job.getQaRounds() + 1);
@@ -495,7 +569,7 @@ public class JobOrchestrator {
             return enterAndSaveAndReturn(job, JobStatus.RENDERING,
                     "QA 未过（第 " + job.getQaRounds() + " 轮），全片重渲染");
         }
-        return failJob(job, "QA 审帧 " + props.getQa().getMaxRounds() + " 轮未过：" + fails, null);
+        return failJob(job, "QA 审帧 " + props.getQa().getMaxRounds() + " 轮未过：" + fails, null, ctx);
     }
 
     // ------------------------------------------------------------------ 落库与回调
@@ -536,20 +610,43 @@ public class JobOrchestrator {
         }
     }
 
-    private void callback(Job job, JobStatus status, String error) {
+    /** M2：渲染/QA 后取消 → 成片丢弃（不入 artifacts，GET /video 因此 404）。 */
+    private void discardArtifactsQuietly(String jobId) {
+        try {
+            Files.deleteIfExists(artifactsFinal(jobId));
+        } catch (IOException e) {
+            log.warn("job={} 成片丢弃失败（残留文件 {}）：{}", jobId, artifactsFinal(jobId), e.getMessage());
+        }
+    }
+
+    /**
+     * 挂起终态回调（I3）：只组装载荷不发送——notify（含退避 sleep 最长数十秒）由
+     * loop/process 层在全部信号量释放后统一执行，绝不占闸阻塞其他任务。
+     */
+    private void deferCallback(Job job, JobStatus status, String error, Ctx ctx) {
         if (job.getCallbackUrl() == null || job.getCallbackUrl().isBlank()) {
             return;
         }
         String videoUrl = status == JobStatus.DONE
                 ? props.getPublicBaseUrl() + "/api/v1/jobs/" + job.getId() + "/video"
                 : null;
+        ctx.callbackUrl = job.getCallbackUrl();
+        ctx.pendingCallback = new CallbackClient.CallbackPayload(job.getId(), status.name(), videoUrl, error);
+    }
+
+    /** 发送挂起回调（仅 loop/process 层调用——此时任何信号量都已释放）。 */
+    private void fireCallback(Ctx ctx) {
+        if (ctx.pendingCallback == null) {
+            return;
+        }
         try {
-            callbackClient.notify(job.getCallbackUrl(),
-                    new CallbackClient.CallbackPayload(job.getId(), status.name(), videoUrl, error));
+            callbackClient.notify(ctx.callbackUrl, ctx.pendingCallback);
         } catch (RuntimeException e) {
             // CallbackClient 承诺不抛；纯防御，回调失败绝不影响终态
-            log.warn("job={} 回调异常 url={}", job.getId(), job.getCallbackUrl(), e);
+            log.warn("回调异常 url={}", ctx.callbackUrl, e);
         }
+        ctx.pendingCallback = null;
+        ctx.callbackUrl = null;
     }
 
     // ------------------------------------------------------------------ 断点续跑
@@ -703,5 +800,8 @@ public class JobOrchestrator {
         List<String> reviewErrors = List.of();
         Path workspace;
         Path artifactsDir;
+        /** 挂起的终态回调（I3）：handler 内只挂起，loop/process 层闸外统一发送。 */
+        CallbackClient.CallbackPayload pendingCallback;
+        String callbackUrl;
     }
 }

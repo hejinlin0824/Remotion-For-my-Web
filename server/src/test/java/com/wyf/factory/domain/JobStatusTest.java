@@ -12,7 +12,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class JobStatusTest {
 
-    /** 合法迁移对全集（spec §11 + 计划 Task 2）：全表 10×10 中仅这 20 对为 true。 */
+    /** 合法迁移对全集（spec §11 + 计划 Task 2 + T10 修复轮 M2 控制器裁决）：全表 10×10 中仅这 22 对为 true。 */
     private static final Set<List<JobStatus>> LEGAL = Set.of(
             // 正向链 QUEUED→EXTRACTING→GENERATING→REVIEWING→SPEAKING→RENDERING→QA→DONE
             List.of(JobStatus.QUEUED, JobStatus.EXTRACTING),
@@ -33,14 +33,17 @@ class JobStatusTest {
             List.of(JobStatus.SPEAKING, JobStatus.FAILED),
             List.of(JobStatus.RENDERING, JobStatus.FAILED),
             List.of(JobStatus.QA, JobStatus.FAILED),
-            // 取消：SPEAKING 起不可取消（spec §11 取消语义）
+            // 取消：SPEAKING 起不可取消（spec §11 取消语义）；
+            // RENDERING/QA→CANCELLED 为 T10 修复轮 M2（阶段完成检查点可取消，成片丢弃）
             List.of(JobStatus.QUEUED, JobStatus.CANCELLED),
             List.of(JobStatus.EXTRACTING, JobStatus.CANCELLED),
             List.of(JobStatus.GENERATING, JobStatus.CANCELLED),
-            List.of(JobStatus.REVIEWING, JobStatus.CANCELLED));
+            List.of(JobStatus.REVIEWING, JobStatus.CANCELLED),
+            List.of(JobStatus.RENDERING, JobStatus.CANCELLED),
+            List.of(JobStatus.QA, JobStatus.CANCELLED));
 
     @Test
-    @DisplayName("10×10 迁移全表：合法 20 对为 true，其余 80 对一律 false")
+    @DisplayName("10×10 迁移全表：合法 22 对为 true，其余 78 对一律 false")
     void canTransit_fullMatrix_onlyLegalPairsPass() {
         assertThat(JobStatus.values()).hasSize(10);
 

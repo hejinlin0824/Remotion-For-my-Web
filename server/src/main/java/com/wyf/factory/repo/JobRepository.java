@@ -7,6 +7,8 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -25,4 +27,7 @@ public interface JobRepository extends JpaRepository<Job, String> {
 
     /** 按状态分页查询（GET /api/v1/jobs?status= 列表） */
     Page<Job> findByStatus(JobStatus status, Pageable pageable);
+
+    /** 终态之外的全部任务（启动 sweep 断点续跑入口，T10 修复轮 M1）。 */
+    List<Job> findByStatusNotIn(Collection<JobStatus> statuses);
 }

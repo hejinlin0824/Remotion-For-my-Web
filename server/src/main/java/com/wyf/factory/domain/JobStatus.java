@@ -3,13 +3,14 @@ package com.wyf.factory.domain;
 import java.util.Set;
 
 /**
- * 任务状态机（spec §11）。
+ * 任务状态机（spec §11 + T10 修复轮 M2 控制器裁决）。
  *
  * <pre>
  * 正向链：QUEUED→EXTRACTING→GENERATING→REVIEWING→SPEAKING→RENDERING→QA→DONE
  * 回退：QA→RENDERING（QA 轮次重渲染）、REVIEWING→GENERATING（驳回重生成）
  * 终态迁移：任意非终态→FAILED；QUEUED/EXTRACTING/GENERATING/REVIEWING→CANCELLED
- * （SPEAKING 起不可取消）；其余一律 false，含终态→任何、自身→自身。
+ * （SPEAKING 起阶段间不可取消）+ RENDERING/QA→CANCELLED（渲染/审帧完成后检查点可取消，
+ * 成片丢弃不入 artifacts——渲染进行中仍不打断，spec §11）；其余一律 false，含终态→任何、自身→自身。
  * </pre>
  */
 public enum JobStatus {
@@ -33,8 +34,8 @@ public enum JobStatus {
             case GENERATING -> to == REVIEWING || to == FAILED || to == CANCELLED;
             case REVIEWING -> to == SPEAKING || to == GENERATING || to == FAILED || to == CANCELLED;
             case SPEAKING -> to == RENDERING || to == FAILED;
-            case RENDERING -> to == QA || to == FAILED;
-            case QA -> to == DONE || to == RENDERING || to == FAILED;
+            case RENDERING -> to == QA || to == FAILED || to == CANCELLED;   // M2：渲染完成后检查点
+            case QA -> to == DONE || to == RENDERING || to == FAILED || to == CANCELLED;   // M2：QA 完成后检查点
             default -> false; // 终态已在入口拦截
         };
     }

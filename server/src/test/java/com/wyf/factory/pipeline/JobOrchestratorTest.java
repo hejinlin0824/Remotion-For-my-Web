@@ -138,6 +138,29 @@ class JobOrchestratorTest {
         return job;
     }
 
+    /** 沿正向链推进到目标阶段（测试起点），历史含 QUEUED→…→target 全部 ENTER。 */
+    private Job claimedJobAt(JobStatus target) {
+        Job job = queuedJob();
+        for (JobStatus step : List.of(JobStatus.EXTRACTING, JobStatus.GENERATING, JobStatus.REVIEWING,
+                JobStatus.SPEAKING, JobStatus.RENDERING)) {
+            if (step.ordinal() > target.ordinal()) {
+                break;
+            }
+            job.enterStage(step, "测试推进");
+        }
+        return job;
+    }
+
+    /** 预置 workspace 断点产物：content.json + audio_meta.json + line_01.wav（wav 数与 scenes 齐）。 */
+    private void presetResumeArtifacts() throws java.io.IOException {
+        Path ws = wsPath();
+        Files.createDirectories(ws.resolve("src/data"));
+        Files.createDirectories(ws.resolve("public/audio/lines"));
+        Files.writeString(ws.resolve("src/data/content.json"), CONTENT_JSON);
+        Files.writeString(ws.resolve("src/data/audio_meta.json"), AUDIO_META_JSON);
+        Files.write(ws.resolve("public/audio/lines/line_01.wav"), WAV_BYTES);
+    }
+
     private Path wsPath() {
         return Path.of(props.getWorkspaceDir()).resolve(JOB_ID);
     }
@@ -336,12 +359,7 @@ class JobOrchestratorTest {
         when(qaFrameCheck.check(any(Path.class))).thenReturn(new QaFrameCheck.QaResult(true, List.of(), 3));
 
         // 预置断点产物：workspace/{jobId}/src/data/*.json + lines wav（wav 数与 scenes 齐才可跳过 SPEAKING）
-        Path ws = wsPath();
-        Files.createDirectories(ws.resolve("src/data"));
-        Files.createDirectories(ws.resolve("public/audio/lines"));
-        Files.writeString(ws.resolve("src/data/content.json"), CONTENT_JSON);
-        Files.writeString(ws.resolve("src/data/audio_meta.json"), AUDIO_META_JSON);
-        Files.write(ws.resolve("public/audio/lines/line_01.wav"), WAV_BYTES);
+        presetResumeArtifacts();
 
         orchestrator.process(JOB_ID);
 
@@ -475,5 +493,167 @@ class JobOrchestratorTest {
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
         verify(renderWorker, times(2)).render(any(Path.class));
         assertThat(job.getQaRounds()).isEqualTo(1);
+    }
+
+    // ---- 11. 修复轮 I2：不可重试渲染异常直接 FAILED ----
+
+    @Test
+    @DisplayName("I2：RenderException(!retryable) → 直接 FAILED，不进重试/回退循环")
+    void renderNonRetryableFailure_failsImmediately() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(renderWorker.render(any(Path.class)))
+                .thenThrow(new RenderWorker.RenderException("渲染失败 exit=1： composition 不存在", false));
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
+        assertThat(job.getErrorMessage()).contains("不可重试").contains("composition 不存在");
+        verify(renderWorker, times(1)).render(any(Path.class));
+        verify(qaFrameCheck, never()).check(any(Path.class));
+        assertThat(job.getQaRounds()).isZero();
+    }
+
+    // ---- 12. 修复轮 M2：渲染完成后取消（成片丢弃） ----
+
+    @Test
+    @DisplayName("M2：渲染期间置 cancelRequested → 渲染完成后停下 CANCELLED，成片丢弃不入 artifacts")
+    void cancel_duringRender_discardsArtifacts() throws Exception {
+        Job job = claimedJobAt(JobStatus.RENDERING);
+        stubRepo(job);
+        presetResumeArtifacts();   // 断点产物让流程直接走到 RENDERING
+        when(workspaceManager.create(eq(JOB_ID), any(), any(), any())).thenReturn(wsPath());
+        when(renderWorker.render(any(Path.class))).thenAnswer(inv -> {
+            job.setCancelRequested(true);   // 渲染进行中 DELETE 落库（渲染中不打断）
+            Files.createDirectories(artifactsFinal().getParent());
+            Files.write(artifactsFinal(), new byte[]{1, 2, 3});   // render 已把成片拷进 artifacts
+            return artifactsFinal();
+        });
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.CANCELLED);
+        assertThat(historyStages(job)).containsExactly(
+                "QUEUED", "EXTRACTING", "GENERATING", "REVIEWING", "SPEAKING", "RENDERING", "CANCELLED");
+        verify(renderWorker, times(1)).render(any(Path.class));   // 渲染中不打断，完成后检查点
+        verifyNoInteractions(qaFrameCheck);
+        assertThat(artifactsFinal()).doesNotExist();   // 成片丢弃（不入 artifacts）
+        verify(workspaceManager).cleanup(JOB_ID);
+        ArgumentCaptor<CallbackClient.CallbackPayload> payload = ArgumentCaptor.forClass(CallbackClient.CallbackPayload.class);
+        verify(callbackClient).notify(eq(CALLBACK_URL), payload.capture());
+        assertThat(payload.getValue().status()).isEqualTo("CANCELLED");
+        assertThat(payload.getValue().videoUrl()).isNull();
+    }
+
+    // ---- 13. 修复轮 M2：QA 完成后取消（成片丢弃，不 DONE） ----
+
+    @Test
+    @DisplayName("M2：QA 期间置 cancelRequested → QA 完成后停下 CANCELLED（即使审帧通过），成片丢弃")
+    void cancel_duringQa_discardsArtifacts() throws Exception {
+        Job job = claimedJobAt(JobStatus.RENDERING);
+        stubRepo(job);
+        presetResumeArtifacts();
+        Files.createDirectories(artifactsFinal().getParent());
+        Files.write(artifactsFinal(), new byte[]{1, 2, 3});   // 上一轮渲染已产成片（RENDERING 将被跳过）
+        when(workspaceManager.workspacePath(JOB_ID)).thenReturn(wsPath());   // QA 的工作区路径（RENDERING 被跳过、ctx.workspace 未建）
+        when(qaFrameCheck.check(any(Path.class))).thenAnswer(inv -> {
+            job.setCancelRequested(true);
+            return new QaFrameCheck.QaResult(true, List.of(), 3);
+        });
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.CANCELLED);
+        verify(renderWorker, never()).render(any(Path.class));   // final.mp4 已在盘 → 渲染跳过
+        verify(qaFrameCheck, times(1)).check(any(Path.class));
+        assertThat(artifactsFinal()).doesNotExist();   // QA 完成后取消 → 成片丢弃，不 DONE
+        verify(workspaceManager).cleanup(JOB_ID);
+        ArgumentCaptor<CallbackClient.CallbackPayload> payload = ArgumentCaptor.forClass(CallbackClient.CallbackPayload.class);
+        verify(callbackClient).notify(eq(CALLBACK_URL), payload.capture());
+        assertThat(payload.getValue().status()).isEqualTo("CANCELLED");
+    }
+
+    // ---- 14. 修复轮 I4：中断保持状态原样，启动 sweep 能再次认领 ----
+
+    @Test
+    @DisplayName("I4：InterruptedException（如 executor 关闭）→ 状态原样保留不 FAILED，sweep 重启后再次提交")
+    void interruption_keepsStatus_sweepReclaims() throws Exception {
+        Job job = claimedJobAt(JobStatus.RENDERING);
+        stubRepo(job);
+        presetResumeArtifacts();
+        when(workspaceManager.create(eq(JOB_ID), any(), any(), any()))
+                .thenThrow(new InterruptedException("executor 已关闭"));
+
+        assertThatCode(() -> orchestrator.process(JOB_ID)).doesNotThrowAnyException();
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.RENDERING);   // 状态原样，等断点续跑
+        assertThat(job.getErrorMessage()).isNull();
+        verify(callbackClient, never()).notify(anyString(), any());
+
+        // 启动 sweep：重启后同一任务再次被提交
+        List<Runnable> submitted = new ArrayList<>();
+        orchestrator.setJobExecutor(submitted::add);
+        when(repo.findByStatusNotIn(any())).thenReturn(List.of(job));
+
+        orchestrator.resumeInterrupted();
+
+        assertThat(submitted).hasSize(1);
+    }
+
+    // ---- 15. 修复轮 M1：启动 sweep 提交全部非终态（QUEUED 留给 poll） ----
+
+    @Test
+    @DisplayName("M1：启动 sweep 逐个提交非终态任务；QUEUED 留给 poll 领单，终态不提交")
+    void startupSweep_submitsNonTerminal_skipsQueuedAndTerminal() {
+        List<Runnable> submitted = new ArrayList<>();
+        orchestrator.setJobExecutor(submitted::add);
+        Job extracting = claimedJob();
+        Job rendering = claimedJobAt(JobStatus.RENDERING);
+        Job queued = queuedJob();
+        Job done = queuedJob();
+        done.setStatus(JobStatus.DONE);
+        when(repo.findByStatusNotIn(any())).thenReturn(List.of(extracting, queued, rendering, done));
+
+        orchestrator.resumeInterrupted();
+
+        assertThat(submitted).hasSize(2);   // EXTRACTING + RENDERING
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<java.util.Collection<JobStatus>> excluded = ArgumentCaptor.forClass(java.util.Collection.class);
+        verify(repo).findByStatusNotIn(excluded.capture());
+        assertThat(excluded.getValue())
+                .containsExactlyInAnyOrder(JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELLED);
+    }
+
+    // ---- 16. 修复轮 I1：续跑后驳回必须真正重生成 ----
+
+    @Test
+    @DisplayName("I1：断点续跑的剧本被驳回 → 清续跑标记，GENATING 真正重生成（而非复用旧 content）")
+    void resume_thenRejected_regeneratesContent() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        presetResumeArtifacts();
+        when(v1.validate(any())).thenReturn(ValidationResult.ok());
+        when(v2.validate(any())).thenReturn(ValidationResult.ok());
+        when(v3.validate(any())).thenReturn(ValidationResult.ok());
+        when(v4.validate(any()))
+                .thenReturn(ValidationResult.fail(List.of("V1/x: 续跑剧本不合格")))
+                .thenReturn(ValidationResult.ok());
+        when(materialStation.generate(any(), anyList())).thenReturn(MATERIAL);
+        when(scriptStation.assemble(any(), any(), anyList()))
+                .thenReturn(JSON.readValue(CONTENT_JSON, ContentJson.class));
+        when(workspaceManager.create(eq(JOB_ID), any(), any(), any())).thenReturn(wsPath());
+        when(renderWorker.render(any(Path.class))).thenReturn(artifactsFinal());
+        when(qaFrameCheck.check(any(Path.class))).thenReturn(new QaFrameCheck.QaResult(true, List.of(), 3));
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        verify(extractStation, never()).extract(anyString());   // 题干仍走续跑
+        // 续跑首次跳过生成；驳回后必须真正重生成一次（I1 修复前 contentResumed 恒 true 会零调用）
+        verify(materialStation, times(1)).generate(any(), anyList());
+        verify(scriptStation, times(1)).assemble(any(), any(), anyList());
+        verify(v4, times(2)).validate(any());
+        assertThat(job.getReviewRetries()).isEqualTo(1);
     }
 }
