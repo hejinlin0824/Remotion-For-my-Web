@@ -1,0 +1,539 @@
+package com.wyf.factory.api;
+
+import com.wyf.factory.api.dto.CreateJobRequest;
+import com.wyf.factory.api.dto.JobView;
+import com.wyf.factory.config.AppProperties;
+import com.wyf.factory.domain.Job;
+import com.wyf.factory.domain.JobStatus;
+import com.wyf.factory.domain.StageHistoryEntry;
+import com.wyf.factory.repo.JobRepository;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+/**
+ * Task 3 契约测试：spec §13 六端点各 1 正 1 反（Global Constraints：16:9 唯一画幅、
+ * Cherry 唯一音色、错误响应统一 {error} 形状、不回显 inputText/imageBase64）。
+ * Controller 层 @WebMvcTest + @MockBean JobService；Service 业务判定另见内嵌 ServiceLogic。
+ */
+@WebMvcTest(JobsController.class)
+@DisplayName("REST API v1 六端点契约")
+class JobsControllerTest {
+
+    @Autowired
+    MockMvc mockMvc;
+
+    @MockBean
+    JobService service;
+
+    // ---------------------------------------------------------------- POST /api/v1/jobs
+
+    @Test
+    @DisplayName("POST 合法 TEXT → 202 {jobId}，请求原样透传 service")
+    void post_validText_returns202WithJobId() throws Exception {
+        when(service.create(any())).thenReturn("uuid-1");
+
+        mockMvc.perform(post("/api/v1/jobs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"inputType":"TEXT","text":"设 f(x)=x^3+ax^2+x 在 R 上单调递增，求 a"}
+                                """))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.jobId").value("uuid-1"));
+
+        ArgumentCaptor<CreateJobRequest> captor = ArgumentCaptor.forClass(CreateJobRequest.class);
+        verify(service).create(captor.capture());
+        assertThat(captor.getValue().inputType()).isEqualTo("TEXT");
+        assertThat(captor.getValue().text()).contains("f(x)=x^3");
+        assertThat(captor.getValue().aspect()).isNull();  // 缺省由 service 层落 "16:9"
+        assertThat(captor.getValue().voice()).isNull();   // 缺省由 service 层落 "Cherry"
+    }
+
+    @Test
+    @DisplayName("POST inputType=IMAGE 无 imageBase64 → 400，error 提 imageBase64")
+    void post_imageWithoutImage_returns400() throws Exception {
+        mockMvc.perform(post("/api/v1/jobs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"inputType":"IMAGE"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("imageBase64")));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    @DisplayName("POST aspect=9:16 → 400（Ruling-12：16:9 唯一画幅），错误文案提 16:9")
+    void post_aspect916_returns400Mentioning169() throws Exception {
+        mockMvc.perform(post("/api/v1/jobs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"inputType":"TEXT","text":"题目","aspect":"9:16"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("16:9")));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    @DisplayName("POST inputType 缺失 → 400")
+    void post_inputTypeMissing_returns400() throws Exception {
+        mockMvc.perform(post("/api/v1/jobs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"text":"题目"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("inputType")));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    @DisplayName("POST voice=Alice → 400（v1 唯一音色 Cherry），错误文案提 Cherry")
+    void post_voiceNotCherry_returns400() throws Exception {
+        mockMvc.perform(post("/api/v1/jobs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"inputType":"TEXT","text":"题目","voice":"Alice"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("Cherry")));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    @DisplayName("POST 请求体缺失/JSON 非法 → 400 {error}（HttpMessageNotReadable 统一处理）")
+    void post_missingBody_returns400() throws Exception {
+        mockMvc.perform(post("/api/v1/jobs").contentType(MediaType.APPLICATION_JSON))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").isNotEmpty());
+    }
+
+    // ---------------------------------------------------------------- POST /api/v1/jobs/batch
+
+    @Test
+    @DisplayName("batch 两合法项 → 202 {jobIds:[..]}")
+    void batch_twoValidItems_returns202WithJobIds() throws Exception {
+        when(service.createBatch(any())).thenReturn(List.of("id-a", "id-b"));
+
+        mockMvc.perform(post("/api/v1/jobs/batch")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"items":[{"inputType":"TEXT","text":"题1"},{"inputType":"IMAGE","imageBase64":"AAAA"}]}
+                                """))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.jobIds[0]").value("id-a"))
+                .andExpect(jsonPath("$.jobIds[1]").value("id-b"));
+    }
+
+    @Test
+    @DisplayName("batch 空 items → 400 整批拒绝")
+    void batch_emptyItems_returns400() throws Exception {
+        mockMvc.perform(post("/api/v1/jobs/batch")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"items":[]}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").isNotEmpty());
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    @DisplayName("batch 含一个非法项 → 400 整批拒绝（不产生任何任务）")
+    void batch_oneInvalidItem_rejectsWholeBatch() throws Exception {
+        mockMvc.perform(post("/api/v1/jobs/batch")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"items":[{"inputType":"TEXT","text":"题1"},{"inputType":"TEXT","text":"题2","aspect":"1:1"}]}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("16:9")));
+        verify(service, never()).createBatch(any());
+    }
+
+    // ---------------------------------------------------------------- GET /api/v1/jobs/{id}
+
+    @Test
+    @DisplayName("GET 存在 → 200 JobView，键集合齐全（含 stageHistory 条目四键与各计数）")
+    void get_existing_returnsFullJobViewKeySet() throws Exception {
+        when(service.get("j1")).thenReturn(java.util.Optional.of(JobView.from(fullJob())));
+
+        mockMvc.perform(get("/api/v1/jobs/j1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.jobId").value("j1"))
+                .andExpect(jsonPath("$.status").value("GENERATING"))
+                .andExpect(jsonPath("$.stage").value("GENERATING"))
+                .andExpect(jsonPath("$.inputType").value("TEXT"))
+                .andExpect(jsonPath("$.aspect").value("16:9"))
+                .andExpect(jsonPath("$.voice").value("Cherry"))
+                .andExpect(jsonPath("$.cancelRequested").value(false))
+                .andExpect(jsonPath("$.extractRetries").value(1))
+                .andExpect(jsonPath("$.genRetries").value(2))
+                .andExpect(jsonPath("$.reviewRetries").value(3))
+                .andExpect(jsonPath("$.ttsRetries").value(4))
+                .andExpect(jsonPath("$.qaRounds").value(5))
+                .andExpect(jsonPath("$.lastError").value("上一轮剧本被驳回"))
+                .andExpect(jsonPath("$.errorMessage").value("终态原因占位"))
+                .andExpect(jsonPath("$.artifactsDir").value("../artifacts/j1"))
+                .andExpect(jsonPath("$.createdAt").value("2026-08-29T11:00:00"))
+                .andExpect(jsonPath("$.updatedAt").value("2026-08-29T12:30:00"))
+                .andExpect(jsonPath("$.stageHistory.length()").value(1))
+                .andExpect(jsonPath("$.stageHistory[0].stage").value("EXTRACTING"))
+                .andExpect(jsonPath("$.stageHistory[0].state").value("ENTER"))
+                .andExpect(jsonPath("$.stageHistory[0].note").value("审题开始"))
+                .andExpect(jsonPath("$.stageHistory[0].at").value("2026-08-29T12:00:00"));
+    }
+
+    @Test
+    @DisplayName("GET 不存在 → 404 {error:'job not found'}")
+    void get_missing_returns404() throws Exception {
+        when(service.get("nope")).thenReturn(java.util.Optional.empty());
+
+        mockMvc.perform(get("/api/v1/jobs/nope"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("job not found"));
+    }
+
+    @Test
+    @DisplayName("GET 不回显 inputText / imageBase64 全文（幂等载荷大且无必要）")
+    void get_existing_neverEchoesInputPayloads() throws Exception {
+        Job job = fullJob();
+        job.setInputText("很长的题干全文……");
+        when(service.get("j1")).thenReturn(java.util.Optional.of(JobView.from(job)));
+
+        mockMvc.perform(get("/api/v1/jobs/j1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.inputText").doesNotExist())
+                .andExpect(jsonPath("$.imageBase64").doesNotExist())
+                .andExpect(jsonPath("$.callbackUrl").doesNotExist());
+    }
+
+    // ---------------------------------------------------------------- GET /api/v1/jobs?status=&page=&size=
+
+    @Test
+    @DisplayName("GET 列表缺省分页 page=0 size=20、无 status 过滤 → 200 {content,totalElements,page,size}")
+    void list_defaultPagination() throws Exception {
+        when(service.list(any(), anyInt(), anyInt()))
+                .thenReturn(new PageImpl<>(List.of(JobView.from(fullJob())), PageRequest.of(0, 20), 1));
+
+        mockMvc.perform(get("/api/v1/jobs"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].jobId").value("j1"))
+                .andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(20));
+
+        verify(service).list(null, 0, 20);
+    }
+
+    @Test
+    @DisplayName("GET 列表 status=QUEUED 过滤 → 200，status 透传 service")
+    void list_statusFilter() throws Exception {
+        when(service.list(any(), anyInt(), anyInt()))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 20), 0));
+
+        mockMvc.perform(get("/api/v1/jobs").param("status", "QUEUED"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content").isArray())
+                .andExpect(jsonPath("$.content").isEmpty());
+
+        verify(service).list(JobStatus.QUEUED, 0, 20);
+    }
+
+    @Test
+    @DisplayName("GET 列表 status=BOGUS → 400")
+    void list_unknownStatus_returns400() throws Exception {
+        mockMvc.perform(get("/api/v1/jobs").param("status", "BOGUS"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("status")));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    @DisplayName("GET 列表 page=abc → 400（参数类型非法）")
+    void list_pageNotNumber_returns400() throws Exception {
+        mockMvc.perform(get("/api/v1/jobs").param("page", "abc"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").isNotEmpty());
+    }
+
+    // ---------------------------------------------------------------- DELETE /api/v1/jobs/{id}
+
+    @Test
+    @DisplayName("DELETE 取消结果 ACCEPTED（QUEUED..REVIEWING）→ 202")
+    void delete_accepted_returns202() throws Exception {
+        when(service.cancel("j1")).thenReturn(JobService.CancelResult.ACCEPTED);
+
+        mockMvc.perform(delete("/api/v1/jobs/j1"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.jobId").value("j1"));
+    }
+
+    @Test
+    @DisplayName("DELETE 取消结果 NOT_CANCELLABLE（SPEAKING 及之后非终态）→ 409 {error}")
+    void delete_conflict_returns409() throws Exception {
+        when(service.cancel("j1")).thenReturn(JobService.CancelResult.NOT_CANCELLABLE);
+
+        mockMvc.perform(delete("/api/v1/jobs/j1"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").isNotEmpty());
+    }
+
+    @Test
+    @DisplayName("DELETE 已终态（DONE/FAILED/CANCELLED）幂等 → 200")
+    void delete_terminalIdempotent_returns200() throws Exception {
+        when(service.cancel("j1")).thenReturn(JobService.CancelResult.ALREADY_TERMINAL);
+
+        mockMvc.perform(delete("/api/v1/jobs/j1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.jobId").value("j1"));
+    }
+
+    @Test
+    @DisplayName("DELETE 不存在 → 404 {error:'job not found'}")
+    void delete_missing_returns404() throws Exception {
+        when(service.cancel("j1")).thenReturn(JobService.CancelResult.NOT_FOUND);
+
+        mockMvc.perform(delete("/api/v1/jobs/j1"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("job not found"));
+    }
+
+    // ---------------------------------------------------------------- GET /api/v1/jobs/{id}/video
+
+    @Test
+    @DisplayName("video 就绪 → 200 video/mp4 + Content-Disposition inline; filename=\"final.mp4\"，字节流原文")
+    void video_ready_streamsMp4WithHeaders(@TempDir Path tempDir) throws Exception {
+        Path mp4 = tempDir.resolve("final.mp4");
+        Files.write(mp4, new byte[] {1, 2, 3, 4});
+        when(service.videoPath("j1")).thenReturn(java.util.Optional.of(mp4));
+
+        mockMvc.perform(get("/api/v1/jobs/j1/video"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.parseMediaType("video/mp4")))
+                .andExpect(header().string(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"final.mp4\""))
+                .andExpect(content().bytes(new byte[] {1, 2, 3, 4}));
+    }
+
+    @Test
+    @DisplayName("video 未就绪/无文件 → 404 {error}")
+    void video_notReady_returns404() throws Exception {
+        when(service.videoPath("j1")).thenReturn(java.util.Optional.empty());
+
+        mockMvc.perform(get("/api/v1/jobs/j1/video"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").isNotEmpty());
+    }
+
+    // ---------------------------------------------------------------- 兜底异常
+
+    @Test
+    @DisplayName("service 抛非预期异常 → 500 {error:'internal error'}，且响应不携带异常细节")
+    void unexpectedException_returns500ErrorShape() throws Exception {
+        when(service.get("j1")).thenThrow(new IllegalStateException("db exploded with 细节"));
+
+        ResultActions result = mockMvc.perform(get("/api/v1/jobs/j1"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.error").value("internal error"));
+
+        assertThat(result.andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8))
+                .doesNotContain("db exploded");
+    }
+
+    // ================================================================= Service 业务判定（薄封装，真实现 + mock repo）
+
+    @Nested
+    @DisplayName("JobService：入队缺省/取消判定/视频定位")
+    class ServiceLogic {
+
+        private final JobRepository repo = mock(JobRepository.class);
+        private final AppProperties props = new AppProperties();
+        private final JobService realService = new JobService(repo, props);
+
+        @Test
+        @DisplayName("create TEXT：落缺省 aspect=16:9 / voice=Cherry，id 为 UUID，artifactsDir 指向产物目录")
+        void create_text_appliesDefaults() {
+            when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            String id = realService.create(new CreateJobRequest("TEXT", "题目全文", null, null, null, "http://cb"));
+
+            assertThat(id).hasSize(36);
+            assertThat(UUID.fromString(id)).isNotNull();
+            ArgumentCaptor<Job> captor = ArgumentCaptor.forClass(Job.class);
+            verify(repo).save(captor.capture());
+            Job saved = captor.getValue();
+            assertThat(saved.getStatus()).isEqualTo(JobStatus.QUEUED);
+            assertThat(saved.getInputType()).isEqualTo("TEXT");
+            assertThat(saved.getInputText()).isEqualTo("题目全文");
+            assertThat(saved.getAspect()).isEqualTo("16:9");
+            assertThat(saved.getVoice()).isEqualTo("Cherry");
+            assertThat(saved.getCallbackUrl()).isEqualTo("http://cb");
+            assertThat(saved.getArtifactsDir()).isEqualTo("../artifacts/" + id);
+        }
+
+        @Test
+        @DisplayName("create IMAGE：imageBase64 以 UTF-8 字节入库（new String 可无损还原 base64 文本供 GLM vision 用）")
+        void create_image_storesBase64Bytes() {
+            when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+            String base64 = "iVBORw0KGgoAAAANSUhEUg==";
+
+            realService.create(new CreateJobRequest("IMAGE", null, base64, "16:9", "Cherry", null));
+
+            ArgumentCaptor<Job> captor = ArgumentCaptor.forClass(Job.class);
+            verify(repo).save(captor.capture());
+            assertThat(new String(captor.getValue().getImageBase64(), StandardCharsets.UTF_8)).isEqualTo(base64);
+            assertThat(captor.getValue().getInputText()).isNull();
+        }
+
+        @Test
+        @DisplayName("cancel QUEUED → ACCEPTED，且落库 cancelRequested=true")
+        void cancel_queued_marksCancelRequested() {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+            when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            assertThat(realService.cancel(job.getId())).isEqualTo(JobService.CancelResult.ACCEPTED);
+
+            ArgumentCaptor<Job> captor = ArgumentCaptor.forClass(Job.class);
+            verify(repo).save(captor.capture());
+            assertThat(captor.getValue().isCancelRequested()).isTrue();
+        }
+
+        @Test
+        @DisplayName("cancel SPEAKING/RENDERING/QA（SPEAKING 及之后非终态）→ NOT_CANCELLABLE，不落库")
+        void cancel_speaking_rejected() {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            job.setStatus(JobStatus.SPEAKING);
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+
+            assertThat(realService.cancel(job.getId())).isEqualTo(JobService.CancelResult.NOT_CANCELLABLE);
+            verify(repo, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("cancel 已终态（DONE）→ ALREADY_TERMINAL 幂等，不落库")
+        void cancel_done_idempotent() {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            job.setStatus(JobStatus.DONE);
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+
+            assertThat(realService.cancel(job.getId())).isEqualTo(JobService.CancelResult.ALREADY_TERMINAL);
+            verify(repo, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("cancel 不存在 → NOT_FOUND")
+        void cancel_missing_notFound() {
+            when(repo.findById("nope")).thenReturn(java.util.Optional.empty());
+
+            assertThat(realService.cancel("nope")).isEqualTo(JobService.CancelResult.NOT_FOUND);
+        }
+
+        @Test
+        @DisplayName("get：映射 JobView（jobId 透传）；不存在 → empty")
+        void get_mapsToView() {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+            when(repo.findById("nope")).thenReturn(java.util.Optional.empty());
+
+            assertThat(realService.get(job.getId())).hasValueSatisfying(v -> assertThat(v.jobId()).isEqualTo(job.getId()));
+            assertThat(realService.get("nope")).isEmpty();
+        }
+
+        @Test
+        @DisplayName("list：status=null 走 findAll，非空走 findByStatus")
+        void list_routesByStatus() {
+            when(repo.findAll(PageRequest.of(0, 20))).thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 20), 0));
+            when(repo.findByStatus(JobStatus.FAILED, PageRequest.of(0, 20)))
+                    .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 20), 0));
+
+            assertThat(realService.list(null, 0, 20).getTotalElements()).isZero();
+            assertThat(realService.list(JobStatus.FAILED, 0, 20).getTotalElements()).isZero();
+
+            verify(repo).findAll(PageRequest.of(0, 20));
+            verify(repo).findByStatus(JobStatus.FAILED, PageRequest.of(0, 20));
+        }
+
+        @Test
+        @DisplayName("videoPath：final.mp4 存在 → 路径；不存在 → empty")
+        void videoPath_checksFileExistence(@TempDir Path tempDir) throws Exception {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            job.setArtifactsDir(tempDir.toString());
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+
+            assertThat(realService.videoPath(job.getId())).isEmpty(); // 未渲染无文件
+
+            Files.write(tempDir.resolve("final.mp4"), new byte[] {9});
+            assertThat(realService.videoPath(job.getId())).contains(tempDir.resolve("final.mp4"));
+        }
+    }
+
+    // ---------------------------------------------------------------- fixtures
+
+    private static Job fullJob() {
+        Job job = new Job();
+        job.setId("j1");
+        job.setInputType("TEXT");
+        job.setInputText("题干全文不应回显");
+        job.setAspect("16:9");
+        job.setVoice("Cherry");
+        job.setCallbackUrl("http://callback.example/cb/1");
+        job.setStatus(JobStatus.GENERATING);
+        job.setStage("GENERATING");
+        job.setCancelRequested(false);
+        job.setExtractRetries(1);
+        job.setGenRetries(2);
+        job.setReviewRetries(3);
+        job.setTtsRetries(4);
+        job.setQaRounds(5);
+        job.setLastError("上一轮剧本被驳回");
+        job.setErrorMessage("终态原因占位");
+        job.setArtifactsDir("../artifacts/j1");
+        job.getStageHistory().clear();
+        job.getStageHistory().add(new StageHistoryEntry(
+                "EXTRACTING", StageHistoryEntry.STATE_ENTER, "审题开始", LocalDateTime.of(2026, 8, 29, 12, 0)));
+        job.setCreatedAt(LocalDateTime.of(2026, 8, 29, 11, 0));
+        job.setUpdatedAt(LocalDateTime.of(2026, 8, 29, 12, 30));
+        return job;
+    }
+}
