@@ -26,10 +26,10 @@ npx remotion render Lecture169 out/final.mp4    # 1080p 原生母版
 - **720p 衍生**：只允许「1080p 母版 + ffmpeg 转码」一条路：
 
   ```bash
-  npx remotion ffmpeg -i out/final.mp4 -vf scale=1280:720 -c:a copy -crf 18 out/final-720p.mp4
+  npx remotion ffmpeg -y -i out/final.mp4 -vf scale=1280:720 -c:a copy -crf 18 out/final-720p.mp4
   ```
 
-  > **<span style="color:red">红字警告：`--width/--height` 只改画布不缩放内容（1080p 元素按绝对像素布局，直接被裁切）；`--scale` 因 2/3 非整数被拒。720p 只允许母版 + ffmpeg 转码。</span>**（sim-001 实证，详见其 pipeline-record F9。）
+  > **⚠️ 红字警告：`--width/--height` 只改画布不缩放内容（1080p 元素按绝对像素布局，直接被裁切）；`--scale` 因 2/3 的浮点表示非整数（如 1080×0.6667=720.036）被 Remotion 拒绝。720p 只允许母版 + ffmpeg 转码。**（sim-001 实证，详见其 pipeline-record F9。）
 
 ## 3. 字段契约（两个 JSON）
 
@@ -51,7 +51,7 @@ npx remotion render Lecture169 out/final.mp4    # 1080p 原生母版
 }
 ```
 
-- **条数范围 knowledge 2-4 / steps 3-10 / pitfalls 1-3 / generalMethod 3-6** 是场景数动态伸缩的基础——scenes 数量随难度/解析内容增减（sim-001 实证 20 场 ≠ golden 17 场，totalFrames 5334→5805 自动适配）。
+- **条数范围 knowledge 2-4 / steps 3-10 / pitfalls 1-3 / generalMethod 3-6** 是场景数动态伸缩的基础——scenes 数量随难度/解析内容增减（sim-001 实证 20 场 ≠ golden 17 场，totalFrames 5334→5805 自动适配）。代码（`contract.ts`）不硬校验条数，只查 ref 越界——条数范围是工位约定；V1 硬校验属 Phase 2。
 - `meta.aspect` 只是请求画幅记录，渲染层不做 throw（Phase 2 的 V1 负责与任务参数核对）。
 - `ttsText` 是口语讲解词（不是题干朗读，题干在画面上）；一句 TTS = 一个镜头。
 - `scenes` 顺序 = 播放顺序，且必须 act2 全部 → act3 全部 → act4 全部。
@@ -129,7 +129,7 @@ cd template
 node scripts/pick_frames.mjs > out/qa/frames.txt
 # ② 逐帧截图
 while IFS=$'\t' read -r name f; do
-  [ "$name" = "totalFrames =" ] && continue
+  [[ "$name" == totalFrames* ]] && continue   # pick_frames 首行输出 "totalFrames = N"（空格分隔，非 tab），整行落入 $name——按前缀跳过
   safe=$(echo "$name" | tr -d '/')
   npx remotion still Lecture169 "out/qa/${safe}.png" --frame="$f"
 done < out/qa/frames.txt
