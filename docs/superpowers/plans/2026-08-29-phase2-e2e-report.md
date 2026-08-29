@@ -55,3 +55,48 @@
 ## 6. 证据文件（`server/target/e2e/`，gitignored）
 
 `timeline.txt`（状态迁移+运维事件）、`polls.tsv`（30s 全量轮询 270+ 行）、`renders.tsv`（并发采样）、`render-procs.txt`（进程级存证）、`final-<jobId>.json`（三 job 截止态完整 JobView）、`batch-response.json`（入队响应）、`server-run.log`（服务日志，无密钥）、`start-server.sh / poller.py / rendermon.py / build-payload.py`（可复跑）。
+
+## R2 重跑（2026-08-30，HEAD=a234a18，T13 修复后）
+
+- **结论：2/3 DONE，1/3 FAILED——spec §16 未整体达成，但较 R1 全方位改善**：job2 截图题 DONE（34.5min，QA 首轮过）、job3 拉格朗日 DONE（110.0min，QA 第 4 轮过）、job1 Z 变换 FAILED（03:57:21→06:11:58 = 134.6min，QA 六判预算尽）。同三题、同流程、H2 全新（R1 库存档 `server/target/e2e2/h2-backup/`）。
+- **T13 修复逐项验证**：① ProblemPanel 行内公式（9f73682）——R1 的 flex 挤压/基线下沉类 FAIL **未再出现**，IMAGE 题 QA 首轮通过（R1 同题首轮驳回），F1 视为修复生效；② QA stills 批量化+qa_glm 并4（a22dad6/a234a18）——QA 单轮 **2.9-7.1min**（10 次实测，均值 ~4.3min，与预估 4.7min 相符；R1 为 17.6-57.2min）；③ video DONE 门禁（06a2b8d）——DONE 200，FAILED/中间态 404，实测符合；④ workspace EPERM 自愈（ade1215）——全程 0 次 EPERM（R1 有 1 次）。
+
+### R1 vs R2 对比
+
+| 维度 | R1（08-29） | R2（08-30） |
+|---|---|---|
+| 入队/看门狗 | 23:26:42 / 100min | 03:57:21 / 110min（job1 超时 +25min，见偏差） |
+| 终态 | 看门狗到点 0/3（均中途，后未续跑） | 2 DONE + 1 FAILED（三 job 均有终态结论） |
+| QA 首轮通过率 | 0/3 | 1/3（IMAGE 题） |
+| QA 单轮耗时 | 17.6 / 29.7 / 57.2 min | 2.9-7.1 min（n=10，均值 ~4.3） |
+| 全片重渲（每轮） | 16-19 min | 14.3-26.2 min（首轮 26.2 为三 job 并发渲染挤压） |
+| job2（截图） | QA r1 57.2min 驳回（公式混排崩坏） | **DONE 34.5min**，QA r1 一次过（27 帧） |
+| job3（拉格朗日） | QA r1 驳回（基线下沉/文字碎裂） | DONE 110.0min，QA 3 驳后第 4 轮过（29 帧） |
+| job1（Z 变换） | V 链驳回 2 轮 + EPERM 重试，QA 进行中 | V 链一次过，QA **六判尽负** FAILED（结论卡公式折行+底缘裁切） |
+| 并发 ≤2 | 168 采样峰值 2 | **334 采样全程覆盖，峰值 2，0 违例** |
+| QA 预算语义 | 未触达 | 暴露 off-by-one（见 F2-R2） |
+
+### 各 job QA 每轮实测（R2）
+
+- job2：r1 过（04:25:52→04:31:54，6.0min，27 帧）。
+- job3：r1 3.4min 驳（顶部卡片上缘裁切+f(b)− 悬垂断行）→ r2 4.4min 驳（上/右缘溢出）→ r3 2.9min 驳（顶部/右缘裁切）→ r4 3.1min **过**（29 帧）。
+- job1：r1 5.25min 驳（`qa_glm exit=1` 无 FAIL 行，归因缺口见 F3-R2）→ r2 3.9min 驳（公式压缩不可读+z=2 拆行）→ r3 7.1min 驳（z=2 跨行断+底部裁切）→ r4 6.2min 驳（同 z=2+标签拆行）→ r5 3.5min 驳（z=2+底缘截断）→ r6 3.0min 驳 → **FAILED**「QA 审帧 5 轮未过：结论卡多处不当折行（"结论"拆为"结/论"、"z = 2"等号后断行）」。
+
+### R2 新发现（均未改代码）
+
+- **F2-R2（bug，server）QA 预算 off-by-one**：`JobOrchestrator.qaRetryOrFail` 先比较后自增（`if (qaRounds < max) { qaRounds+1; 重渲 }`），maxRounds=5 实际执行 **6 次 QA 判定/6 次全片渲染**，第 6 判负才 FAILED 且报文仍是「5 轮未过」。job1 由此多跑一轮（~+21min）。建议比较与自增顺序对调或改 `<=` 语义，交控制器派单。
+- **F3-R2（minor，归因缺口）**：job1 r1 驳回时 report.md 无 FAIL 行，`collectFails` 兜底记 `qa_glm exit=1`，具体哪帧因何种错误判负不可追溯（并行 qa_glm 的按帧隔离把错误细节留在进程 stdout 中丢失）。建议 qa_glm 把 per-frame error 也写入 report.md。
+- **F4-R2（内容/模板层，R2 驳回主因）**：驳回模式已从 R1 的「flex 挤压/基线下沉」变为**生成内容几何溢出类**：结论卡公式在等号后折行（z=2 拆行）、卡片标签竖向拆行、卡片溢出画面上/右/下边缘。job1 六轮同因、job3 三轮同因——生成侧随机重试对该类缺陷命中率低（job1 6/6 复现），全片重渲成本 ~17min/轮， math-heavy 文本题极易预算耗尽。V1-V4 结构/保真校验均不拦渲染级溢出，QA 是唯一防线（工作正常）。方向建议（供裁决）：conclusion/卡片文本长度硬约束进 V 链、或 formula 段禁止折行的模板级 white-space 约束、或驳回时携带帧号定向重生成。
+- **F5-R2（minor）**：FAILED 任务 artifacts 保留末轮被判废成片（job1 24.4MB），video 正确 404；与「FAILED 保留现场」设计一致，仅提示磁盘占用。
+- **运维偏差**：110min 看门狗 05:47 到点时 job3 恰 DONE、job1 正在第 6 渲染；为取得终态结论有界延至 06:12（+25min）收线，其余铁律（服务树杀净、8080 释放、artifacts 保留、工作树仅报告 commit）均遵守。后台 shell 两次 ~60min 被会话收割（服务 JVM 孤儿存活、轮询前台续采），与 R1 同模式。
+
+### R2 断言清单
+
+整批 202（3 jobId）✓；stageHistory 全量含 EXTRACTING..DONE 全阶段（job1 至 FAILED 亦逐轮留痕，**无缺失条目**——反证 R1 F4 确为误报）✓；video 200 且 >1MB（仅 DONE：job2 20,480,641B / job3 26,633,494B；FAILED 404）✓；artifacts 三目录独立 ✓；渲染并发 ≤2（全程 334 采样 0 违例）✓。
+
+### R2 成片清单
+
+- DONE：`artifacts/02a4c152-…/final.mp4`（20.5MB，截图题）、`artifacts/982494d1-…/final.mp4`（26.6MB，拉格朗日）。
+- FAILED（判废存档，未定版）：`artifacts/3375fb19-…/final.mp4`（24.4MB，Z 变换，QA 六判驳回的最后一片）。
+
+R2 证据文件：`server/target/e2e2/`（polls.tsv 470+ 行 30s 轮询、timeline.txt、renders.tsv 334 行全程采样、final-*.json/txt 三 job 终态快照、batch-response.json、server-run.log 无密钥、可复跑脚本四件）。
