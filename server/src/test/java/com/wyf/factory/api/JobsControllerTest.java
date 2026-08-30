@@ -18,6 +18,7 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpHeaders;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
@@ -28,6 +29,7 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -456,6 +458,16 @@ class JobsControllerTest {
                 .doesNotContain("db exploded");
     }
 
+    @Test
+    @DisplayName("T15b① 定性证据：cancel 抛 ObjectOptimisticLockingFailureException（未兜住的读改写冲突）→ 兜底 500（R3 attempt3 现场 500 的成因通路）")
+    void cancel_optimisticLockCollision_surfacesAs500() throws Exception {
+        when(service.cancel("j1")).thenThrow(new ObjectOptimisticLockingFailureException(Job.class, "j1"));
+
+        mockMvc.perform(delete("/api/v1/jobs/j1"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.error").value("internal error"));
+    }
+
     // ================================================================= Service 业务判定（薄封装，真实现 + mock repo）
 
     @Nested
@@ -607,6 +619,81 @@ class JobsControllerTest {
             when(repo.findById("nope")).thenReturn(java.util.Optional.empty());
 
             assertThat(realService.cancel("nope")).isEqualTo(JobService.CancelResult.NOT_FOUND);
+        }
+
+        @Test
+        @DisplayName("T15b①：cancel 落库撞乐观锁（编排器 GENERATING 重试循环并发落库）→ 重读重试置位而非抛 OLE，仍 202+cancelRequested")
+        void cancel_optimisticLockRace_retriesAndMarks() {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            job.setStatus(JobStatus.GENERATING);
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+            when(repo.save(any(Job.class)))
+                    .thenThrow(new ObjectOptimisticLockingFailureException(Job.class, job.getId()))
+                    .thenAnswer(inv -> inv.getArgument(0));
+
+            assertThat(realService.cancel(job.getId())).isEqualTo(JobService.CancelResult.ACCEPTED);
+
+            verify(repo, times(2)).findById(job.getId());   // 撞锁后重读最新行
+            verify(repo, times(2)).save(any(Job.class));    // 首次被顶掉 + 重试成功
+            assertThat(job.isCancelRequested()).isTrue();
+        }
+
+        @Test
+        @DisplayName("T15b①：并发窗口内编排器把任务推进到 SPEAKING → 重读后按既有语义 409，不 500 不再落库")
+        void cancel_raceMovesToSpeaking_returns409() {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            job.setStatus(JobStatus.GENERATING);
+            AtomicBoolean firstRead = new AtomicBoolean(true);
+            when(repo.findById(job.getId())).thenAnswer(inv -> {
+                if (firstRead.compareAndSet(true, false)) {
+                    return java.util.Optional.of(job);
+                }
+                job.setStatus(JobStatus.SPEAKING);   // 并发窗口内编排器推进
+                return java.util.Optional.of(job);
+            });
+            when(repo.save(any(Job.class)))
+                    .thenThrow(new ObjectOptimisticLockingFailureException(Job.class, job.getId()));
+
+            assertThat(realService.cancel(job.getId())).isEqualTo(JobService.CancelResult.NOT_CANCELLABLE);
+            verify(repo, times(1)).save(any(Job.class));
+        }
+
+        @Test
+        @DisplayName("T15b①：并发窗口内编排器把任务推到终态（DONE）→ 重读后按既有语义 200 幂等，不再置位")
+        void cancel_raceMovesToTerminal_returns200() {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            job.setStatus(JobStatus.GENERATING);
+            AtomicBoolean firstRead = new AtomicBoolean(true);
+            when(repo.findById(job.getId())).thenAnswer(inv -> {
+                if (firstRead.compareAndSet(true, false)) {
+                    return java.util.Optional.of(job);
+                }
+                job.setStatus(JobStatus.DONE);   // 并发窗口内编排器已完成归档
+                return java.util.Optional.of(job);
+            });
+            when(repo.save(any(Job.class)))
+                    .thenThrow(new ObjectOptimisticLockingFailureException(Job.class, job.getId()));
+
+            assertThat(realService.cancel(job.getId())).isEqualTo(JobService.CancelResult.ALREADY_TERMINAL);
+            verify(repo, times(1)).save(any(Job.class));   // 撞锁那一次被回滚，不再有第二次写（真库下不落任何标记）
+        }
+
+        @Test
+        @DisplayName("T15b①：持续并发冲突（有界重试全撞）→ 语义化 503 {error} 兜底而非裸 OLE")
+        void cancel_persistentRace_exhaustsAs503() {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            job.setStatus(JobStatus.GENERATING);
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+            when(repo.save(any(Job.class)))
+                    .thenThrow(new ObjectOptimisticLockingFailureException(Job.class, job.getId()));
+
+            assertThatThrownBy(() -> realService.cancel(job.getId()))
+                    .isInstanceOf(GlobalExceptionHandler.ApiException.class)
+                    .hasFieldOrPropertyWithValue("status", 503);
         }
 
         @Test

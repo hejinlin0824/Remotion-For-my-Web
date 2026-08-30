@@ -29,3 +29,4 @@ app:
     max-rounds: 5
   retry:
     content-max: 3
+    gen-deadline-minutes: 30   # T15b②：GENERATING 墙钟死线（进阶段落库 now+值，重试撞线直接判死）

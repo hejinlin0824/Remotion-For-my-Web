@@ -6,6 +6,7 @@ import com.wyf.factory.content.ContentJson;
 import com.wyf.factory.domain.Job;
 import com.wyf.factory.domain.JobStatus;
 import com.wyf.factory.domain.StageHistoryEntry;
+import com.wyf.factory.glm.GlmException;
 import com.wyf.factory.render.QaFrameCheck;
 import com.wyf.factory.render.RenderWorker;
 import com.wyf.factory.render.WorkspaceManager;
@@ -37,6 +38,7 @@ import org.springframework.orm.ObjectOptimisticLockingFailureException;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -791,5 +793,129 @@ class JobOrchestratorTest {
         verify(scriptStation, times(1)).assemble(any(), any(), anyList());
         verify(v4, times(2)).validate(any());
         assertThat(job.getReviewRetries()).isEqualTo(1);
+    }
+
+    // ---- 17. T15b②：GENERATING 重试墙钟死线 ----
+
+    @Test
+    @DisplayName("T15b②：墙钟超限 → 无视剩余次数直接 FAILED，lastError/errorMessage 注明「重试墙钟超限」，不再重试")
+    void generating_wallClockExceeded_failsImmediatelyIgnoringBudget() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(materialStation.generate(any(), anyList())).thenAnswer(inv -> {
+            // 模拟库内死线已过（如重启续跑后墙钟到点）：进 GENERATING 后死线为过去时刻
+            job.setGenDeadlineAt(LocalDateTime.now().minusMinutes(1));
+            throw new GlmException("GLM 请求 IO/超时失败（视为瞬态）", true);
+        });
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
+        assertThat(job.getGenRetries()).isZero();   // 无视剩余次数：不进入计数路径
+        assertThat(job.getErrorMessage()).contains("重试墙钟超限").contains("GLM 请求 IO/超时失败");
+        assertThat(job.getLastError()).contains("重试墙钟超限");
+        verify(materialStation, times(1)).generate(any(), anyList());
+    }
+
+    @Test
+    @DisplayName("T15b②：墙钟未超限 → 既有计数逻辑不变（预算内就地重试至耗尽才 FAILED），且进 GENERATING 落库了死线")
+    void generating_withinWallClock_countPathUnchanged_andDeadlinePersisted() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(materialStation.generate(any(), anyList()))
+                .thenThrow(new GlmException("GLM 请求 IO/超时失败（视为瞬态）", true));
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
+        assertThat(job.getErrorMessage()).contains("重试 3 次预算耗尽").doesNotContain("墙钟");
+        assertThat(job.getGenRetries()).isEqualTo(props.getRetry().getContentMax());
+        verify(materialStation, times(props.getRetry().getContentMax() + 1)).generate(any(), anyList());
+        // 死线落库：进 GENERATING 时即落 now+配置值（默认 30min）
+        assertThat(job.getGenDeadlineAt()).isNotNull();
+        assertThat(job.getGenDeadlineAt()).isAfter(LocalDateTime.now().plusMinutes(28));
+        assertThat(job.getGenDeadlineAt()).isBefore(LocalDateTime.now().plusMinutes(31));
+    }
+
+    @Test
+    @DisplayName("T15b②：合法驳回回环（V 驳回→重进 GENERATING）刷新墙钟死线（每轮 GENERATING 自得全额）")
+    void reviewRejection_reentersGenerating_refreshesDeadline() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        LocalDateTime planted = LocalDateTime.now().minusHours(1);   // 模拟上一轮残留的旧死线
+        when(v4.validate(any()))
+                .thenAnswer(inv -> {
+                    job.setGenDeadlineAt(planted);
+                    return ValidationResult.fail(List.of("V1/x: 驳回一次"));
+                })
+                .thenReturn(ValidationResult.ok());
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        assertThat(historyStages(job)).containsSubsequence(
+                "GENERATING", "REVIEWING", "GENERATING", "REVIEWING");
+        // 重进 GENERATING 时死线被刷新为新一轮 now+30min，而非残留旧值
+        assertThat(job.getGenDeadlineAt()).isAfter(LocalDateTime.now().plusMinutes(29));
+        assertThat(job.getReviewRetries()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("T15b②：渲染链不加墙钟——genDeadlineAt 已过也照常就地重渲（渲染已有 30min spawn 硬界）")
+    void renderChain_ignoresGenDeadline() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(renderWorker.render(any(Path.class), any()))
+                .thenAnswer(inv -> {
+                    job.setGenDeadlineAt(LocalDateTime.now().minusMinutes(1));   // 库内残留的过期死线
+                    throw new RenderWorker.RenderException("渲染超时（>30 分钟）", true);
+                })
+                .thenReturn(artifactsFinal());
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        verify(renderWorker, times(2)).render(any(Path.class), any());   // 死线过期不拦渲染链重试
+    }
+
+    // ---- 18. T15b③：renderRetryOrFail off-by-one（T14a M-2） ----
+
+    @Test
+    @DisplayName("T15b③ off-by-one：渲染链恰 maxRounds=5 次失败即 FAILED（旧码先比较后自增实跑 N+1=6 次）")
+    void renderChain_failsAfterExactlyMaxRoundsAttempts() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(renderWorker.render(any(Path.class), any()))
+                .thenThrow(new RenderWorker.RenderException("渲染进程超时/崩溃", true));
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
+        verify(renderWorker, times(props.getQa().getMaxRounds())).render(any(Path.class), any());   // 恰 5 次，非 6
+        assertThat(job.getQaRounds()).isEqualTo(props.getQa().getMaxRounds());
+        assertThat(job.getErrorMessage()).contains("预算（5）耗尽");
+    }
+
+    @Test
+    @DisplayName("T15b③ 边界：第 maxRounds 次尝试成功 → DONE（恰 N 次而非 N-1，预算不缩水）")
+    void renderChain_succeedsOnLastAllowedAttempt() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        RenderWorker.RenderException boom = new RenderWorker.RenderException("渲染进程超时/崩溃", true);
+        when(renderWorker.render(any(Path.class), any()))
+                .thenThrow(boom, boom, boom, boom)
+                .thenReturn(artifactsFinal());
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        verify(renderWorker, times(5)).render(any(Path.class), any());
+        assertThat(job.getQaRounds()).isEqualTo(props.getQa().getMaxRounds() - 1);
     }
 }

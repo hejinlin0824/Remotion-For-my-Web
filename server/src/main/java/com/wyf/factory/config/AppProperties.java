@@ -82,9 +82,13 @@ public class AppProperties {
     /** 内容工位重试配置 */
     public static class Retry {
         private int contentMax = 3;
+        /** GENERATING 墙钟死线（分钟，T15b②）：进 GENERATING 落库 now+值，重试撞线直接判死 */
+        private long genDeadlineMinutes = 30;
 
         public int getContentMax() { return contentMax; }
         public void setContentMax(int contentMax) { this.contentMax = contentMax; }
+        public long getGenDeadlineMinutes() { return genDeadlineMinutes; }
+        public void setGenDeadlineMinutes(long genDeadlineMinutes) { this.genDeadlineMinutes = genDeadlineMinutes; }
     }
 
     public String getTemplateDir() { return templateDir; }

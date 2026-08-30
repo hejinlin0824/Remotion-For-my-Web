@@ -1,5 +1,7 @@
 package com.wyf.factory.repo;
 
+import com.wyf.factory.api.JobService;
+import com.wyf.factory.config.AppProperties;
 import com.wyf.factory.domain.Job;
 import com.wyf.factory.domain.JobStatus;
 import com.wyf.factory.domain.StageHistoryEntry;
@@ -18,10 +20,16 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
 @DataJpaTest
 class JobRepositoryTest {
@@ -185,6 +193,59 @@ class JobRepositoryTest {
             // 本测试绕过了 @DataJpaTest 的回滚（NOT_SUPPORTED），清理本行避免泄漏进共享测试库
             repo.deleteById(jobId);
         }
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED) // 真提交入库， rival 事务与 cancel 落库才看得见同一行
+    @DisplayName("T15b① 真乐观锁复现（R3 attempt3）：cancel 读改写窗口内编排器并发提交一次 → 恰一次撞乐观锁，修复后重读重试置位成功（修复前 OLE 穿出 → 兜底 500）")
+    void cancel_tocTou_racingOrchestratorSave_retriesInsteadOfFailing() {
+        Job job = repo.saveAndFlush(newJob("TEXT"));
+        job.enterStage(JobStatus.EXTRACTING, "领单");
+        job = repo.saveAndFlush(job);
+        job.enterStage(JobStatus.GENERATING, "素材+剧本生成开始");
+        job = repo.saveAndFlush(job);
+        String jobId = job.getId();
+
+        AtomicInteger rivalBumps = new AtomicInteger();
+        // Spring Data 代理不可 Mockito.spy（unwrap 失败），用 delegatesTo 包装真实 bean，仅改写 save
+        JobRepository racing = mock(JobRepository.class, delegatesTo(repo));
+        doAnswer(inv -> {
+            if (rivalBumps.compareAndSet(0, 1)) {
+                // 模拟编排器 retryOrFail 在 cancel 的 findById 与 save 之间落库恰一次（版本推进）
+                EntityManager rival = emf.createEntityManager();
+                try {
+                    rival.getTransaction().begin();
+                    Job fresh = rival.find(Job.class, jobId);
+                    fresh.setLastError("GLM 请求 IO/超时失败（视为瞬态）");
+                    rival.getTransaction().commit();
+                } finally {
+                    rival.close();
+                }
+            }
+            return repo.save(inv.getArgument(0));
+        }).when(racing).save(any(Job.class));
+
+        JobService.CancelResult result = new JobService(racing, new AppProperties()).cancel(jobId);
+
+        assertThat(result).isEqualTo(JobService.CancelResult.ACCEPTED);
+        assertThat(rivalBumps).hasValue(1);   // 编排器只并发提交一次：撞锁后重读重试恰一次成功
+        Job after = repo.findById(jobId).orElseThrow();
+        assertThat(after.isCancelRequested()).isTrue();
+        assertThat(after.getStatus()).isEqualTo(JobStatus.GENERATING);   // 只置位标记，不改状态
+        assertThat(after.getLastError()).isEqualTo("GLM 请求 IO/超时失败（视为瞬态）");   // 编排器写入未被抹掉
+        repo.deleteById(jobId); // 绕过 @DataJpaTest 回滚（NOT_SUPPORTED），清理避免泄漏进共享测试库
+    }
+
+    @Test
+    @DisplayName("T15b②：genDeadlineAt 列持久往返（断点续跑/sweep 后墙钟仍生效的落库前提）")
+    void genDeadlineAt_roundtripsThroughDb() {
+        Job job = newJob("TEXT");
+        job.setGenDeadlineAt(LocalDateTime.now().truncatedTo(ChronoUnit.MICROS).plusMinutes(30));
+        em.persistAndFlush(job);
+        em.clear();
+
+        Job loaded = em.find(Job.class, job.getId());
+        assertThat(loaded.getGenDeadlineAt()).isEqualTo(job.getGenDeadlineAt());
     }
 
     private static boolean hasOptimisticLockConflict(Throwable t) {

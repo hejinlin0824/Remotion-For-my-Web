@@ -89,6 +89,14 @@ public class Job {
     @Lob
     private String lastError;
 
+    /**
+     * GENERATING 墙钟死线（T15b②）：每次进入 GENERATING 落库 now+配置值；retryOrFail 先查墙钟，
+     * 超线无视剩余次数直接 failJob（R3 attempt3 实证：纯次数预算在 GLM 网络病态时挂 14h+）。
+     * 合法驳回回环（V/QA 判负→GENERATING）重进时刷新；断点续跑（sweep）从库读回仍生效；
+     * NULL=无死线（未进过 GENERATING 或升级窗口期旧行），按既有计数逻辑。
+     */
+    private LocalDateTime genDeadlineAt;
+
     /** 终态原因（FAILED/CANCELLED 时写入） */
     @Lob
     private String errorMessage;
@@ -184,6 +192,8 @@ public class Job {
     public void setQaRounds(int qaRounds) { this.qaRounds = qaRounds; }
     public String getLastError() { return lastError; }
     public void setLastError(String lastError) { this.lastError = lastError; }
+    public LocalDateTime getGenDeadlineAt() { return genDeadlineAt; }
+    public void setGenDeadlineAt(LocalDateTime genDeadlineAt) { this.genDeadlineAt = genDeadlineAt; }
     public String getErrorMessage() { return errorMessage; }
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
     public String getArtifactsDir() { return artifactsDir; }

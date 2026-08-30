@@ -8,6 +8,7 @@ import com.wyf.factory.domain.JobStatus;
 import com.wyf.factory.repo.JobRepository;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
@@ -68,8 +69,12 @@ public class JobService {
         return result.map(JobView::from);
     }
 
+    /** cancel 置位落库的并发重试上限与间隔（T15b①）：编排器单次落库毫秒级，5×20ms 实践上必成功。 */
+    static final int CANCEL_SAVE_ATTEMPTS = 5;
+    static final long CANCEL_RETRY_BACKOFF_MS = 20;
+
     /**
-     * 取消判定（spec §11 修订：取消放宽至 RENDERING/QA，终态幂等）：
+     * 取消判定（spec §11 修订：取消放宽至 RENDERING/QA，终态幂等；T15b① 并发加固）：
      * <ul>
      *   <li>QUEUED/EXTRACTING/GENERATING/REVIEWING/RENDERING/QA → 置 cancelRequested=true 落库 →
      *       ACCEPTED（202）。RENDERING/QA 只置标记，由编排器在渲染/QA 工位完成后收割
@@ -78,22 +83,49 @@ public class JobService {
      *   <li>DONE/FAILED/CANCELLED → ALREADY_TERMINAL（200 幂等）；</li>
      *   <li>id 不存在 → NOT_FOUND（404）。</li>
      * </ul>
+     *
+     * <p><b>T15b①（R3 attempt3 现场实证）</b>：GENERATING 僵尸期间编排器 retryOrFail 循环持续落库，
+     * 本方法的「读→改→写」与编排器 save 撞 {@code @Version} →
+     * {@link org.springframework.orm.ObjectOptimisticLockingFailureException} 穿出 →
+     * GlobalExceptionHandler 兜底 500，取消标记从未落库。修复：撞锁后重读最新行按最新状态重判
+     * （并发窗口内编排器可能已推进到 SPEAKING/终态，按既有语义返回 409/200），有界重试置位，
+     * 绝不向上抛；重试耗尽（编排器毫秒级落库下实践不可达）才语义化 503。</p>
      */
     public CancelResult cancel(String id) {
-        Optional<Job> found = repo.findById(id);
-        if (found.isEmpty()) {
-            return CancelResult.NOT_FOUND;
-        }
-        Job job = found.get();
-        return switch (job.getStatus()) {
-            case QUEUED, EXTRACTING, GENERATING, REVIEWING, RENDERING, QA -> {
-                job.setCancelRequested(true);
-                repo.save(job);
-                yield CancelResult.ACCEPTED;
+        for (int attempt = 0; attempt < CANCEL_SAVE_ATTEMPTS; attempt++) {
+            Optional<Job> found = repo.findById(id);
+            if (found.isEmpty()) {
+                return CancelResult.NOT_FOUND;
             }
-            case SPEAKING -> CancelResult.NOT_CANCELLABLE;
-            case DONE, FAILED, CANCELLED -> CancelResult.ALREADY_TERMINAL;
-        };
+            Job job = found.get();
+            switch (job.getStatus()) {
+                case QUEUED, EXTRACTING, GENERATING, REVIEWING, RENDERING, QA -> {
+                    try {
+                        job.setCancelRequested(true);
+                        repo.save(job);
+                        return CancelResult.ACCEPTED;
+                    } catch (ObjectOptimisticLockingFailureException raced) {
+                        sleepBeforeCancelRetry();
+                    }
+                }
+                case SPEAKING -> {
+                    return CancelResult.NOT_CANCELLABLE;
+                }
+                case DONE, FAILED, CANCELLED -> {
+                    return CancelResult.ALREADY_TERMINAL;
+                }
+            }
+        }
+        throw new GlobalExceptionHandler.ApiException(503, "取消落库与编排器持续并发冲突，请稍后重试");
+    }
+
+    private static void sleepBeforeCancelRetry() {
+        try {
+            Thread.sleep(CANCEL_RETRY_BACKOFF_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new GlobalExceptionHandler.ApiException(503, "取消落库被中断，请重试");
+        }
     }
 
     /**

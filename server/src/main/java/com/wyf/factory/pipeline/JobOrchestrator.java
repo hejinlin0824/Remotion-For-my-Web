@@ -38,6 +38,7 @@ import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -305,17 +306,17 @@ public class JobOrchestrator {
 
     private Job doExtracting(Job job, Ctx ctx) {
         if (ctx.contentResumed) {
-            return enterAndSave(job, JobStatus.GENERATING, "断点续跑：content.json 已在盘，跳过审题");
+            return enterGenerating(job, "断点续跑：content.json 已在盘，跳过审题");
         }
         if (ctx.extracted != null) {
-            return enterAndSave(job, JobStatus.GENERATING, "审题产物已在手，直接进入生成");
+            return enterGenerating(job, "审题产物已在手，直接进入生成");
         }
         try {
             ExtractResult extracted = semaphores.withGlm(() -> "IMAGE".equals(job.getInputType())
                     ? extractStation.extractImage(imagePayload(job), IMAGE_MIME)
                     : extractStation.extract(job.getInputText()));
             ctx.extracted = extracted;
-            return enterAndSave(job, JobStatus.GENERATING, "审题完成（" + extracted.problemType() + "）");
+            return enterGenerating(job, "审题完成（" + extracted.problemType() + "）");
         } catch (ExtractStation.FatalExtractException fatal) {
             // 读不出题/非数学题：同素材重试无意义（spec §9），直接判死
             return failJob(job, fatal.getMessage(), fatal, ctx);
@@ -325,6 +326,23 @@ public class JobOrchestrator {
     }
 
     // ------------------------------------------------------------------ 阶段：GENERATING
+
+    /**
+     * （重）进入 GENERATING（T15b②）：每次进入都（重新）落库墙钟死线 genDeadlineAt = now + 配置值
+     * （默认 30min）。合法驳回回环（V/QA 判负→GENERATING）重进即刷新——每轮 GENERATING 自得全额；
+     * 死线随 restart 持久（sweep 续跑从库读回仍生效）。EXTRACTING 首轮/未进过 GENERATING 的行为
+     * NULL=无死线，按既有计数逻辑。
+     */
+    private Job enterGenerating(Job job, String note) {
+        job.setGenDeadlineAt(LocalDateTime.now().plusMinutes(props.getRetry().getGenDeadlineMinutes()));
+        return enterAndSave(job, JobStatus.GENERATING, note);
+    }
+
+    /** 同 {@link #enterGenerating}，但返回库内最新状态（QA 判负路由用）。 */
+    private Job enterGeneratingAndReturn(Job job, String note) {
+        job.setGenDeadlineAt(LocalDateTime.now().plusMinutes(props.getRetry().getGenDeadlineMinutes()));
+        return enterAndSaveAndReturn(job, JobStatus.GENERATING, note);
+    }
 
     private Job doGenerating(Job job, Ctx ctx) {
         if (ctx.contentResumed) {
@@ -386,7 +404,7 @@ public class JobOrchestrator {
             // 否则续跑场景下 ctx.content 恒非空会被误判为"已在盘"而永不重生成
             ctx.contentResumed = false;
             job.setLastError(tail(String.join("; ", errors), LAST_ERROR_TAIL));
-            return enterAndSave(job, JobStatus.GENERATING,
+            return enterGenerating(job,
                     "V1-V4 驳回（第 " + (used + 1) + " 轮），错误清单回传重生成");
         }
         return failJob(job, "内容校验连续驳回 " + used + " 轮未过：" + String.join("; ", errors), null, ctx);
@@ -556,10 +574,21 @@ public class JobOrchestrator {
     // ------------------------------------------------------------------ 重试判定
 
     /**
-     * 可重试异常的预算判定：未到上限就地重试（留在原状态，循环重跑本阶段），到顶 FAILED。
+     * 可重试异常的预算判定：先查 GENERATING 墙钟死线（T15b②），超线无视剩余次数直接判死；
+     * 未超线按既有计数逻辑——未到上限就地重试（留在原状态，循环重跑本阶段），到顶 FAILED。
      * 阶段内瞬态退避已由 glm/tts 客户端内置，这里只管跨尝试预算。
+     *
+     * <p><b>墙钟动机（R3 attempt3 实证）</b>：跨尝试计数与 GLM 客户端内部有界重试相乘，
+     * 网络病态时两个有界=无界墙钟，job GENERATING 僵尸 14h+ 不终态。死线在进 GENERATING
+     * 时落库（{@link #enterGenerating}），restart/sweep 续跑后仍生效；驳回回环重进刷新。</p>
      */
     private Job retryOrFail(Job job, RuntimeException e, String stage, int used, IntConsumer setUsed, Ctx ctx) {
+        LocalDateTime deadline = job.getGenDeadlineAt();
+        if (deadline != null && LocalDateTime.now().isAfter(deadline)) {
+            String message = stage + "重试墙钟超限（死线 " + deadline + "，已用 " + used
+                    + "/" + props.getRetry().getContentMax() + "）：" + e.getMessage();
+            return failJob(job, message, null, ctx);   // cause=null → lastError=message（注明墙钟超限）
+        }
         int max = props.getRetry().getContentMax();
         if (used < max) {
             setUsed.accept(used + 1);
@@ -589,8 +618,12 @@ public class JobOrchestrator {
         if (!e.isRetryable()) {
             return failJob(job, "渲染失败（不可重试）：" + e.getMessage(), e, ctx);
         }
-        if (job.getQaRounds() < props.getQa().getMaxRounds()) {
-            job.setQaRounds(job.getQaRounds() + 1);
+        // T15b③ off-by-one（T14a M-2 顺延）：先自增后比较——qaRounds=已消耗轮数，
+        // max=N 恰 N 次（旧码先比较后自增，max=N 实跑 N+1）；与 qaRetryOrFail 同款语义。
+        // 渲染链不加墙钟（T15b②）：渲染进程已有 30min spawn 超时硬界。
+        int round = job.getQaRounds() + 1;
+        job.setQaRounds(round);
+        if (round < props.getQa().getMaxRounds()) {
             job.setLastError(tail(String.valueOf(e.getMessage()), LAST_ERROR_TAIL));
             saveTolerant(job);
             return job;   // RENDERING 就地重渲 / QA 就地重审（留原状态，循环重跑本阶段）
@@ -631,7 +664,7 @@ public class JobOrchestrator {
             ctx.workspace = null;
             job.setLastError(tail(fails, LAST_ERROR_TAIL));
             discardStaleFinalQuietly(job);   // 防御残留旧成片：防 RENDERING 断点判定跳过唯一一次渲染
-            return enterAndSaveAndReturn(job, JobStatus.GENERATING,
+            return enterGeneratingAndReturn(job,
                     "QA 未过（第 " + round + " 轮），FAIL 清单回传重生成");
         }
         return failJob(job, "QA 审帧 " + props.getQa().getMaxRounds() + " 轮未过：" + fails, null, ctx);
