@@ -191,7 +191,7 @@ class JobOrchestratorTest {
             return JSON.readValue(AUDIO_META_JSON, AudioMeta.class);
         });
         when(workspaceManager.create(eq(JOB_ID), any(), any(), any())).thenReturn(wsPath());
-        when(renderWorker.render(any(Path.class))).thenReturn(artifactsFinal());
+        when(renderWorker.render(any(Path.class), any())).thenReturn(artifactsFinal());
         when(qaFrameCheck.check(any(Path.class))).thenReturn(new QaFrameCheck.QaResult(true, List.of(), 3));
     }
 
@@ -231,7 +231,7 @@ class JobOrchestratorTest {
         // QA 前置：审帧工作区由 QA 现建（渲染未发生），审帧通过后才渲染，渲染成功即 DONE（无第二轮 QA）
         flow.verify(workspaceManager).create(eq(JOB_ID), any(), any(), any());
         flow.verify(qaFrameCheck).check(wsPath());
-        flow.verify(renderWorker).render(wsPath());
+        flow.verify(renderWorker).render(wsPath(), "1080p");   // T17：缺省任务渲染 1080p（落库 resolution 透传）
         flow.verify(workspaceManager).cleanup(JOB_ID);
         flow.verify(callbackClient).notify(eq(CALLBACK_URL), any());
         // 渲染复用 QA 预审建好的工作区：create 全链恰一次（不重建 → qa 产物不被洗掉）
@@ -244,6 +244,23 @@ class JobOrchestratorTest {
         assertThat(payload.getValue().videoUrl())
                 .isEqualTo("http://localhost:8080/api/v1/jobs/" + JOB_ID + "/video");
         assertThat(payload.getValue().error()).isNull();
+    }
+
+    // ---- 1b. 720p 任务（T17）：落库 resolution 透传 RenderWorker ----
+
+    @Test
+    @DisplayName("720p 任务全链：渲染收到 resolution=720p（--scale 映射的编排侧证据），其余链路不变")
+    void resolution720p_passedThroughToRenderWorker() throws Exception {
+        Job job = claimedJob();
+        job.setResolution("720p");
+        stubRepo(job);
+        stubStationsOk();
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        verify(renderWorker).render(wsPath(), "720p");
+        verify(renderWorker, never()).render(wsPath(), "1080p");
     }
 
     // ---- 2. 校验驳回 2 轮后过 ----
@@ -320,7 +337,7 @@ class JobOrchestratorTest {
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
         assertThat(job.getQaRounds()).isEqualTo(2);
         verify(qaFrameCheck, times(3)).check(any(Path.class));
-        verify(renderWorker, times(1)).render(any(Path.class));      // Ruling-18：预审驳回循环零渲染，通过后只渲一次
+        verify(renderWorker, times(1)).render(any(Path.class), any());      // Ruling-18：预审驳回循环零渲染，通过后只渲一次
         verify(ttsPipeline, times(3)).synthesizeAll(any(), any());   // 剧本变了 → TTS 重做，不得复用旧音频
         verify(workspaceManager, times(3)).create(anyString(), any(), any(), any());   // 每轮预审按当轮剧本现建工作区
 
@@ -362,7 +379,7 @@ class JobOrchestratorTest {
         verify(qaFrameCheck, times(5)).check(any(Path.class));    // 恰 5 次 QA 判定（off-by-one 修复，T14a 语义保留）
         verify(materialStation, times(5)).generate(any(), anyList());
         verify(scriptStation, times(5)).assemble(any(), any(), anyList());
-        verify(renderWorker, never()).render(any(Path.class));    // Ruling-18：判负循环在渲染之前，一次渲染都不发生
+        verify(renderWorker, never()).render(any(Path.class), any());    // Ruling-18：判负循环在渲染之前，一次渲染都不发生
         assertThat(job.getErrorMessage()).contains("QA 审帧 5 轮未过").contains("FAIL s03 结论卡多处不当折行");
         ArgumentCaptor<CallbackClient.CallbackPayload> payload = ArgumentCaptor.forClass(CallbackClient.CallbackPayload.class);
         verify(callbackClient).notify(eq(CALLBACK_URL), payload.capture());
@@ -394,7 +411,7 @@ class JobOrchestratorTest {
         ArgumentCaptor<ContentJson> spoken = ArgumentCaptor.forClass(ContentJson.class);
         verify(ttsPipeline, times(2)).synthesizeAll(spoken.capture(), any());
         assertThat(spoken.getAllValues().get(1)).isEqualTo(v2);     // TTS 朗读的也是新剧本
-        verify(renderWorker, times(1)).render(any(Path.class));     // 只有通过的版本才付渲染成本
+        verify(renderWorker, times(1)).render(any(Path.class), any());     // 只有通过的版本才付渲染成本
     }
 
     // ---- 4b. T12 F4 回归（Ruling-18 改版）：审帧链异常就地重审，绝不回退重渲让未审成片直达 DONE ----
@@ -413,7 +430,7 @@ class JobOrchestratorTest {
         orchestrator.process(JOB_ID);
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
-        verify(renderWorker, times(1)).render(any(Path.class));   // 异常发生在渲染之前，重审不重渲
+        verify(renderWorker, times(1)).render(any(Path.class), any());   // 异常发生在渲染之前，重审不重渲
         verify(workspaceManager, times(1)).create(anyString(), any(), any(), any());   // 重审复用同一工作区
         assertThat(job.getQaRounds()).isEqualTo(1);
         assertThat(job.getLastError()).contains("审帧截图失败");
@@ -456,7 +473,7 @@ class JobOrchestratorTest {
         when(v3.validate(any())).thenReturn(ValidationResult.ok());
         when(v4.validate(any())).thenReturn(ValidationResult.ok());
         when(workspaceManager.workspacePath(JOB_ID)).thenReturn(wsPath());   // QA 复用盘上工作区的定位入口
-        when(renderWorker.render(any(Path.class))).thenReturn(artifactsFinal());
+        when(renderWorker.render(any(Path.class), any())).thenReturn(artifactsFinal());
         when(qaFrameCheck.check(any(Path.class))).thenReturn(new QaFrameCheck.QaResult(true, List.of(), 3));
 
         // 预置断点产物：workspace/{jobId}/src/data/*.json + lines wav（wav 数与 scenes 齐才可跳过 SPEAKING）
@@ -474,7 +491,7 @@ class JobOrchestratorTest {
         // 渲染复用同一工作区——create 全程零调用
         verify(workspaceManager, never()).create(anyString(), any(), any(), any());
         verify(qaFrameCheck).check(wsPath());
-        verify(renderWorker).render(wsPath());
+        verify(renderWorker).render(wsPath(), "1080p");
     }
 
     @Test
@@ -489,7 +506,7 @@ class JobOrchestratorTest {
         orchestrator.process(JOB_ID);
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
-        verify(renderWorker, never()).render(any(Path.class));
+        verify(renderWorker, never()).render(any(Path.class), any());
         verify(qaFrameCheck, never()).check(any(Path.class));   // 不再重审——渲染后无 QA 轮
         verify(workspaceManager, never()).create(anyString(), any(), any(), any());
         assertThat(job.getArtifactsDir())
@@ -605,14 +622,14 @@ class JobOrchestratorTest {
         Job job = claimedJob();
         stubRepo(job);
         stubStationsOk();
-        when(renderWorker.render(any(Path.class)))
+        when(renderWorker.render(any(Path.class), any()))
                 .thenThrow(new RenderWorker.RenderException("渲染超时（>30 分钟）", true))
                 .thenReturn(artifactsFinal());
 
         orchestrator.process(JOB_ID);
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
-        verify(renderWorker, times(2)).render(any(Path.class));
+        verify(renderWorker, times(2)).render(any(Path.class), any());
         assertThat(job.getQaRounds()).isEqualTo(1);
     }
 
@@ -624,14 +641,14 @@ class JobOrchestratorTest {
         Job job = claimedJob();
         stubRepo(job);
         stubStationsOk();
-        when(renderWorker.render(any(Path.class)))
+        when(renderWorker.render(any(Path.class), any()))
                 .thenThrow(new RenderWorker.RenderException("渲染失败 exit=1： composition 不存在", false));
 
         orchestrator.process(JOB_ID);
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
         assertThat(job.getErrorMessage()).contains("不可重试").contains("composition 不存在");
-        verify(renderWorker, times(1)).render(any(Path.class));
+        verify(renderWorker, times(1)).render(any(Path.class), any());
         verify(qaFrameCheck, times(1)).check(any(Path.class));   // Ruling-18：预审先于渲染完成
         assertThat(job.getQaRounds()).isZero();
     }
@@ -645,7 +662,7 @@ class JobOrchestratorTest {
         stubRepo(job);
         presetResumeArtifacts();   // 断点产物让流程直接走到 RENDERING
         when(workspaceManager.create(eq(JOB_ID), any(), any(), any())).thenReturn(wsPath());
-        when(renderWorker.render(any(Path.class))).thenAnswer(inv -> {
+        when(renderWorker.render(any(Path.class), any())).thenAnswer(inv -> {
             job.setCancelRequested(true);   // 渲染进行中 DELETE 落库（渲染中不打断）
             Files.createDirectories(artifactsFinal().getParent());
             Files.write(artifactsFinal(), new byte[]{1, 2, 3});   // render 已把成片拷进 artifacts
@@ -657,7 +674,7 @@ class JobOrchestratorTest {
         assertThat(job.getStatus()).isEqualTo(JobStatus.CANCELLED);
         assertThat(historyStages(job)).containsExactly(
                 "QUEUED", "EXTRACTING", "GENERATING", "REVIEWING", "SPEAKING", "QA", "RENDERING", "CANCELLED");
-        verify(renderWorker, times(1)).render(any(Path.class));   // 渲染中不打断，完成后检查点
+        verify(renderWorker, times(1)).render(any(Path.class), any());   // 渲染中不打断，完成后检查点
         verifyNoInteractions(qaFrameCheck);
         assertThat(artifactsFinal()).doesNotExist();   // 成片丢弃（不入 artifacts）
         verify(workspaceManager).cleanup(JOB_ID);
@@ -684,7 +701,7 @@ class JobOrchestratorTest {
         orchestrator.process(JOB_ID);
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.CANCELLED);
-        verify(renderWorker, never()).render(any(Path.class));   // 预审先于渲染：取消后渲染成本一次都不付
+        verify(renderWorker, never()).render(any(Path.class), any());   // 预审先于渲染：取消后渲染成本一次都不付
         verify(qaFrameCheck, times(1)).check(any(Path.class));
         assertThat(artifactsFinal()).doesNotExist();   // 预审阶段无成片可丢（渲染未发生），不入 artifacts
         verify(workspaceManager).cleanup(JOB_ID);
@@ -762,7 +779,7 @@ class JobOrchestratorTest {
         when(scriptStation.assemble(any(), any(), anyList()))
                 .thenReturn(JSON.readValue(CONTENT_JSON, ContentJson.class));
         when(workspaceManager.create(eq(JOB_ID), any(), any(), any())).thenReturn(wsPath());
-        when(renderWorker.render(any(Path.class))).thenReturn(artifactsFinal());
+        when(renderWorker.render(any(Path.class), any())).thenReturn(artifactsFinal());
         when(qaFrameCheck.check(any(Path.class))).thenReturn(new QaFrameCheck.QaResult(true, List.of(), 3));
 
         orchestrator.process(JOB_ID);

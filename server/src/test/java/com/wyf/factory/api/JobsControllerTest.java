@@ -35,6 +35,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -137,6 +138,37 @@ class JobsControllerTest {
     }
 
     @Test
+    @DisplayName("POST resolution=720p → 202，原样透传 service（T17：缺省校验在 service 层落 1080p）")
+    void post_resolution720p_passthrough() throws Exception {
+        when(service.create(any())).thenReturn("uuid-r");
+
+        mockMvc.perform(post("/api/v1/jobs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"inputType":"TEXT","text":"题目","resolution":"720p"}
+                                """))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.jobId").value("uuid-r"));
+
+        ArgumentCaptor<CreateJobRequest> captor = ArgumentCaptor.forClass(CreateJobRequest.class);
+        verify(service).create(captor.capture());
+        assertThat(captor.getValue().resolution()).isEqualTo("720p");
+    }
+
+    @Test
+    @DisplayName("POST resolution=4k → 400（T17：仅 1080p/720p），错误文案提 resolution")
+    void post_resolutionInvalid_returns400() throws Exception {
+        mockMvc.perform(post("/api/v1/jobs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"inputType":"TEXT","text":"题目","resolution":"4k"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("resolution")));
+        verifyNoInteractions(service);
+    }
+
+    @Test
     @DisplayName("POST 请求体缺失/JSON 非法 → 400 {error}（HttpMessageNotReadable 统一处理）")
     void post_missingBody_returns400() throws Exception {
         mockMvc.perform(post("/api/v1/jobs").contentType(MediaType.APPLICATION_JSON))
@@ -187,6 +219,42 @@ class JobsControllerTest {
         verify(service, never()).createBatch(any());
     }
 
+    @Test
+    @DisplayName("batch 逐题独立 resolution：720p 与缺省混排 → 202，各自原样透传（T17）")
+    void batch_perItemIndependentResolutions() throws Exception {
+        when(service.createBatch(any())).thenReturn(List.of("id-a", "id-b"));
+
+        mockMvc.perform(post("/api/v1/jobs/batch")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"items":[{"inputType":"TEXT","text":"题1","resolution":"720p"},
+                                          {"inputType":"TEXT","text":"题2"}]}
+                                """))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.jobIds[0]").value("id-a"))
+                .andExpect(jsonPath("$.jobIds[1]").value("id-b"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<CreateJobRequest>> captor = ArgumentCaptor.forClass(List.class);
+        verify(service).createBatch(captor.capture());
+        assertThat(captor.getValue().get(0).resolution()).isEqualTo("720p");
+        assertThat(captor.getValue().get(1).resolution()).isNull();
+    }
+
+    @Test
+    @DisplayName("batch 一项 resolution 非法 → 400 整批拒绝，合法项也不入队（T17）")
+    void batch_oneInvalidResolution_rejectsWholeBatch() throws Exception {
+        mockMvc.perform(post("/api/v1/jobs/batch")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"items":[{"inputType":"TEXT","text":"题1","resolution":"720p"},
+                                          {"inputType":"TEXT","text":"题2","resolution":"1080"}]}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("resolution")));
+        verify(service, never()).createBatch(any());
+    }
+
     // ---------------------------------------------------------------- GET /api/v1/jobs/{id}
 
     @Test
@@ -202,6 +270,7 @@ class JobsControllerTest {
                 .andExpect(jsonPath("$.inputType").value("TEXT"))
                 .andExpect(jsonPath("$.aspect").value("16:9"))
                 .andExpect(jsonPath("$.voice").value("Cherry"))
+                .andExpect(jsonPath("$.resolution").value("1080p"))
                 .andExpect(jsonPath("$.cancelRequested").value(false))
                 .andExpect(jsonPath("$.extractRetries").value(1))
                 .andExpect(jsonPath("$.genRetries").value(2))
@@ -398,11 +467,11 @@ class JobsControllerTest {
         private final JobService realService = new JobService(repo, props);
 
         @Test
-        @DisplayName("create TEXT：落缺省 aspect=16:9 / voice=Cherry，id 为 UUID，artifactsDir 指向产物目录")
+        @DisplayName("create TEXT：落缺省 aspect=16:9 / voice=Cherry / resolution=1080p，id 为 UUID，artifactsDir 指向产物目录")
         void create_text_appliesDefaults() {
             when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-            String id = realService.create(new CreateJobRequest("TEXT", "题目全文", null, null, null, "http://cb"));
+            String id = realService.create(new CreateJobRequest("TEXT", "题目全文", null, null, null, null, "http://cb"));
 
             assertThat(id).hasSize(36);
             assertThat(UUID.fromString(id)).isNotNull();
@@ -414,6 +483,7 @@ class JobsControllerTest {
             assertThat(saved.getInputText()).isEqualTo("题目全文");
             assertThat(saved.getAspect()).isEqualTo("16:9");
             assertThat(saved.getVoice()).isEqualTo("Cherry");
+            assertThat(saved.getResolution()).isEqualTo("1080p");
             assertThat(saved.getCallbackUrl()).isEqualTo("http://cb");
             assertThat(saved.getArtifactsDir()).isEqualTo("../artifacts/" + id);
         }
@@ -424,12 +494,40 @@ class JobsControllerTest {
             when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
             String base64 = "iVBORw0KGgoAAAANSUhEUg==";
 
-            realService.create(new CreateJobRequest("IMAGE", null, base64, "16:9", "Cherry", null));
+            realService.create(new CreateJobRequest("IMAGE", null, base64, "16:9", "Cherry", null, null));
 
             ArgumentCaptor<Job> captor = ArgumentCaptor.forClass(Job.class);
             verify(repo).save(captor.capture());
             assertThat(new String(captor.getValue().getImageBase64(), StandardCharsets.UTF_8)).isEqualTo(base64);
             assertThat(captor.getValue().getInputText()).isNull();
+        }
+
+        @Test
+        @DisplayName("create 显式 resolution=720p：原样落库（T17）")
+        void create_explicit720p_stored() {
+            when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            realService.create(new CreateJobRequest("TEXT", "题目全文", null, "16:9", "Cherry", "720p", null));
+
+            ArgumentCaptor<Job> captor = ArgumentCaptor.forClass(Job.class);
+            verify(repo).save(captor.capture());
+            assertThat(captor.getValue().getResolution()).isEqualTo("720p");
+        }
+
+        @Test
+        @DisplayName("createBatch 逐题独立 resolution：720p 与 1080p 混排各落各的（T17 batch 语义）")
+        void createBatch_perItemIndependentResolutions() {
+            when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            realService.createBatch(List.of(
+                    new CreateJobRequest("TEXT", "题1", null, null, null, "720p", null),
+                    new CreateJobRequest("TEXT", "题2", null, null, null, "1080p", null),
+                    new CreateJobRequest("TEXT", "题3", null, null, null, null, null)));
+
+            ArgumentCaptor<Job> captor = ArgumentCaptor.forClass(Job.class);
+            verify(repo, times(3)).save(captor.capture());
+            assertThat(captor.getAllValues()).extracting(Job::getResolution)
+                    .containsExactly("720p", "1080p", "1080p");
         }
 
         @Test

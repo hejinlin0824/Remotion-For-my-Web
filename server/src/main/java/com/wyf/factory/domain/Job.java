@@ -64,6 +64,15 @@ public class Job {
     @Column(length = 50)
     private String voice;
 
+    /**
+     * 渲染档位（T17）："1080p"（默认，原生 1920×1080 母版）| "720p"（--scale=2/3 等比 1280×720，
+     * 模板/composition 零改动）。落库字段：断点续跑/重渲必须从这里读，不能只存内存。
+     * 字段初始化缺省 1080p：golden 体系默认路径不动；库里升级窗口期的 NULL 旧行由
+     * RenderWorker 的 null 容错按 1080p 处理。
+     */
+    @Column(length = 10)
+    private String resolution = "1080p";
+
     private String callbackUrl;
 
     /** 取消标记：阶段间检查点发现即停（SPEAKING 起不可取消） */
@@ -157,6 +166,8 @@ public class Job {
     public void setAspect(String aspect) { this.aspect = aspect; }
     public String getVoice() { return voice; }
     public void setVoice(String voice) { this.voice = voice; }
+    public String getResolution() { return resolution; }
+    public void setResolution(String resolution) { this.resolution = resolution; }
     public String getCallbackUrl() { return callbackUrl; }
     public void setCallbackUrl(String callbackUrl) { this.callbackUrl = callbackUrl; }
     public boolean isCancelRequested() { return cancelRequested; }

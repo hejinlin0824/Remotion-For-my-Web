@@ -437,7 +437,9 @@ public class JobOrchestrator {
         }
         semaphores.render().acquire();
         try {
-            Path mp4 = renderWorker.render(ctx.workspace);   // 全片渲染（不复用短渲）
+            // 全片渲染（不复用短渲）；T17：渲染档位从落库实体读（断点续跑/重渲一致），
+            // 库内历史 NULL 行由 RenderWorker 容错按 1080p 处理
+            Path mp4 = renderWorker.render(ctx.workspace, job.getResolution());
             ctx.artifactsDir = mp4.getParent();
         } catch (RenderWorker.RenderException e) {
             // failJob 只落库+挂起回调，notify 在 loop 层（闸外）执行——I3

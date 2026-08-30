@@ -36,6 +36,8 @@ public class JobsController {
 
     private static final String ONLY_ASPECT = "16:9";   // Ruling-12：唯一画幅
     private static final String ONLY_VOICE = "Cherry";  // D6：v1 唯一音色
+    /** T17：可选渲染档位白名单（缺省 1080p 由 service 层落） */
+    private static final List<String> RESOLUTIONS = List.of("1080p", "720p");
 
     private final JobService service;
 
@@ -129,6 +131,9 @@ public class JobsController {
         }
         if (r.voice() != null && !ONLY_VOICE.equals(r.voice())) {
             throw new ApiException(400, "voice 仅支持 Cherry（收到: " + r.voice() + "）");
+        }
+        if (r.resolution() != null && !RESOLUTIONS.contains(r.resolution())) {
+            throw new ApiException(400, "resolution 仅支持 1080p/720p（收到: " + r.resolution() + "）");
         }
     }
 

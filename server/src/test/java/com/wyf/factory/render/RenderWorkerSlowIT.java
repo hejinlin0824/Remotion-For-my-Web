@@ -56,7 +56,7 @@ class RenderWorkerSlowIT {
                     .as("junction 可穿读模板依赖").isDirectory();
             assertThat(ws.resolve("node_modules/@remotion")).isDirectory();
 
-            Path mp4 = renderWorker.render(ws, "0-30");
+            Path mp4 = renderWorker.renderFrames(ws, "0-30", "1080p");
 
             assertThat(mp4).isRegularFile();
             assertThat(Files.size(mp4)).isGreaterThan(100_000);

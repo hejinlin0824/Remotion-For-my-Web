@@ -19,7 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * RenderWorker（fake ProcessRunner 注入，零真调）：命令拼接（含/不含 --frames）、
+ * RenderWorker（fake ProcessRunner 注入，零真调）：命令拼接（含/不含 --frames、resolution→--scale）、
  * exit!=0 → retryable RenderException 且消息含 stderr 摘要、timedOut → retryable、
  * 成功路径复制 ws/out/final.mp4 → artifacts/{jobId}/final.mp4。
  */
@@ -62,13 +62,56 @@ class RenderWorkerTest {
     }
 
     @Test
-    @DisplayName("帧段渲染命令：末尾追加 --frames=0-30")
+    @DisplayName("1080p 显式：命令与缺省逐字一致，不追加任何 flag（T17 零漂移门槛）")
+    void resolution1080p_commandUnchanged() throws Exception {
+        renderSuccess();
+
+        worker.render(ws, "1080p");
+
+        assertThat(runner.calls.get(0).command()).containsExactly(
+                "cmd", "/c", "npx", "remotion", "render", "Lecture169", "out/final.mp4");
+    }
+
+    @Test
+    @DisplayName("720p：仅追加 --scale=0.6666666666666666（2/3 等比 1280×720），模板/composition 零改动")
+    void resolution720p_appendsScaleFlag() throws Exception {
+        renderSuccess();
+
+        worker.render(ws, "720p");
+
+        assertThat(runner.calls.get(0).command()).containsExactly(
+                "cmd", "/c", "npx", "remotion", "render", "Lecture169", "out/final.mp4",
+                "--scale=0.6666666666666666");
+    }
+
+    @Test
+    @DisplayName("帧段渲染（1080p）：末尾追加 --frames=0-30，无 --scale")
     void frameRangeRenderCommand() throws Exception {
         renderSuccess();
 
-        worker.render(ws, "0-30");
+        worker.renderFrames(ws, "0-30", "1080p");
 
         assertThat(runner.calls.get(0).command()).endsWith("--frames=0-30");
+        assertThat(runner.calls.get(0).command()).doesNotContain("--scale=0.6666666666666666");
+    }
+
+    @Test
+    @DisplayName("帧段渲染（720p）：--scale 与 --frames 并存（短段目验用）")
+    void frameRangeRenderCommand_720p_hasBothFlags() throws Exception {
+        renderSuccess();
+
+        worker.renderFrames(ws, "0-30", "720p");
+
+        assertThat(runner.calls.get(0).command()).endsWith("--scale=0.6666666666666666", "--frames=0-30");
+    }
+
+    @Test
+    @DisplayName("未知 resolution 快速失败 IllegalArgumentException（防把非法值静默当 1080p 整片渲）")
+    void unknownResolution_failsFast() {
+        assertThatThrownBy(() -> worker.render(ws, "4k"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("4k");
+        assertThat(runner.calls).isEmpty();
     }
 
     @Test

@@ -42,6 +42,7 @@ class JobRepositoryTest {
         job.setInputText("设 f(x)=x^3+ax^2+x 在 R 上单调递增，求 a 的取值范围");
         job.setAspect("16:9");
         job.setVoice("Cherry");
+        job.setResolution("720p");
         job.setCallbackUrl("http://callback.example/cb/1");
         job.setArtifactsDir("artifacts/job-1");
         byte[] png = {(byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3};
@@ -61,6 +62,7 @@ class JobRepositoryTest {
         assertThat(loaded.getInputText()).isEqualTo("设 f(x)=x^3+ax^2+x 在 R 上单调递增，求 a 的取值范围");
         assertThat(loaded.getAspect()).isEqualTo("16:9");
         assertThat(loaded.getVoice()).isEqualTo("Cherry");
+        assertThat(loaded.getResolution()).isEqualTo("720p");
         assertThat(loaded.getCallbackUrl()).isEqualTo("http://callback.example/cb/1");
         assertThat(loaded.getArtifactsDir()).isEqualTo("artifacts/job-1");
         assertThat(loaded.getImageBase64()).containsExactly(png);
@@ -85,7 +87,7 @@ class JobRepositoryTest {
     }
 
     @Test
-    @DisplayName("新任务默认：status=QUEUED、id=UUID(36位)、重试计数全 0")
+    @DisplayName("新任务默认：status=QUEUED、id=UUID(36位)、resolution=1080p、重试计数全 0")
     void persist_newJob_defaults() {
         Job job = newJob("IMAGE");
         em.persistAndFlush(job);
@@ -95,6 +97,7 @@ class JobRepositoryTest {
         assertThat(loaded.getId()).hasSize(36);
         assertThat(loaded.getStatus()).isEqualTo(JobStatus.QUEUED);
         assertThat(loaded.getStage()).isEqualTo("QUEUED");
+        assertThat(loaded.getResolution()).isEqualTo("1080p");
         assertThat(loaded.getExtractRetries()).isZero();
         assertThat(loaded.getGenRetries()).isZero();
         assertThat(loaded.getReviewRetries()).isZero();

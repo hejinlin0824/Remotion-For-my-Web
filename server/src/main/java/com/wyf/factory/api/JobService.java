@@ -45,6 +45,8 @@ public class JobService {
         }
         job.setAspect(r.aspect() != null ? r.aspect() : "16:9");
         job.setVoice(r.voice() != null ? r.voice() : "Cherry");
+        // T17：缺省落 1080p（golden 体系不动）；720p 由 RenderWorker 映射 --scale=2/3 等比出 1280×720
+        job.setResolution(r.resolution() != null ? r.resolution() : "1080p");
         job.setCallbackUrl(r.callbackUrl());
         job.setArtifactsDir(props.getArtifactsDir() + "/" + job.getId());
         return repo.save(job).getId();

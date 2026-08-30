@@ -12,6 +12,7 @@ import java.util.List;
  * 也不让 base64/题干全文出现在任何响应面（Global Constraint 4 泄漏面最小化）。
  */
 public record JobView(String jobId, String status, String stage, String inputType, String aspect, String voice,
+                      String resolution,
                       boolean cancelRequested, int extractRetries, int genRetries, int reviewRetries,
                       int ttsRetries, int qaRounds, String lastError, String errorMessage, String artifactsDir,
                       List<StageHistoryView> stageHistory, LocalDateTime createdAt, LocalDateTime updatedAt) {
@@ -24,6 +25,7 @@ public record JobView(String jobId, String status, String stage, String inputTyp
                 j.getInputType(),
                 j.getAspect(),
                 j.getVoice(),
+                j.getResolution(),
                 j.isCancelRequested(),
                 j.getExtractRetries(),
                 j.getGenRetries(),

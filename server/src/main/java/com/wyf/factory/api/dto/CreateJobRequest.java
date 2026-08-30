@@ -10,9 +10,10 @@ package com.wyf.factory.api.dto;
  *   <li>imageBase64：IMAGE 必填（base64 文本）；</li>
  *   <li>aspect：可空（缺省落 "16:9"），提供则必须等于 "16:9"（Ruling-12）；</li>
  *   <li>voice：可空（缺省落 "Cherry"），提供则必须等于 "Cherry"（v1 唯一音色）；</li>
+ *   <li>resolution：可空（缺省落 "1080p"），提供则必须为 "1080p" | "720p"（T17，batch 逐题独立）；</li>
  *   <li>callbackUrl：可空终态回调。</li>
  * </ul>
  */
 public record CreateJobRequest(String inputType, String text, String imageBase64,
-                               String aspect, String voice, String callbackUrl) {
+                               String aspect, String voice, String resolution, String callbackUrl) {
 }
