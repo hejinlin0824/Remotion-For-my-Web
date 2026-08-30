@@ -23,13 +23,13 @@ npx remotion render Lecture169 out/final.mp4    # 1080p 原生母版
 ```
 
 - 契约校验在 bundle 模块加载时执行（`src/engine/data.ts`：`validateContract` + `buildTimeline`，任一违规直接 throw 中止渲染）。渲染前可用 `npx remotion compositions src/index.ts` 快速自检契约。
-- **720p 衍生**：只允许「1080p 母版 + ffmpeg 转码」一条路：
+- **720p 衍生**（勘误 2026-08-31，T17 独立评审实证 Remotion 4.0.518）：**推荐直渲**——`npx remotion render Lecture169 out/final.mp4 --scale=0.6666666666666666`（全精度 2/3 字面量，1920/1080×scale 恰为 1280/720 整数，等比输出、内容相对比例与 1080p 完全一致；Phase 2 服务的 `resolution:"720p"` 档即走此路径）；备选=1080p 母版 + ffmpeg 转码：
 
   ```bash
   npx remotion ffmpeg -y -i out/final.mp4 -vf scale=1280:720 -c:a copy -crf 18 out/final-720p.mp4
   ```
 
-  > **⚠️ 红字警告：`--width/--height` 只改画布不缩放内容（1080p 元素按绝对像素布局，直接被裁切）；`--scale` 因 2/3 的浮点表示非整数（如 1080×0.6667=720.036）被 Remotion 拒绝。720p 只允许母版 + ffmpeg 转码。**（sim-001 实证，详见其 pipeline-record F9。）
+  > **⚠️ 红字警告（保留，实证属实）：`--width/--height` 只改画布不缩放内容（1080p 元素按绝对像素布局，直接被裁切），严禁用于 720p。**（历史注记：sim-001 曾记录"--scale 被拒"；2026-08-31 T17 评审在 4.0.518 实测全精度 2/3 与 0.6667 字面量均被接受且正确出 1280×720，与该记录矛盾——按现行实证以直渲为准，历史根因不作断言。）
 
 ## 3. 字段契约（两个 JSON）
 
