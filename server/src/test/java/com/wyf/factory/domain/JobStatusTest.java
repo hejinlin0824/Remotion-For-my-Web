@@ -14,7 +14,7 @@ class JobStatusTest {
 
     /**
      * 合法迁移对全集（spec §11 + 计划 Task 2 + T10 修复轮 M2 + Ruling-17 + Ruling-18）：
-     * 全表 10×10 中仅这 24 对为 true。
+     * 全表 10×10 中仅这 22 对为 true。
      */
     private static final Set<List<JobStatus>> LEGAL = Set.of(
             // 正向链 QUEUED→EXTRACTING→GENERATING→REVIEWING→SPEAKING→QA→RENDERING→DONE
@@ -47,7 +47,7 @@ class JobStatusTest {
             List.of(JobStatus.QA, JobStatus.CANCELLED));
 
     @Test
-    @DisplayName("10×10 迁移全表：合法 24 对为 true，其余 76 对一律 false")
+    @DisplayName("10×10 迁移全表：合法 22 对为 true，其余 78 对一律 false")
     void canTransit_fullMatrix_onlyLegalPairsPass() {
         assertThat(JobStatus.values()).hasSize(10);
 
