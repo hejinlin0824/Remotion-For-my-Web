@@ -217,6 +217,6 @@ python scripts/qa_glm.py
 
 **零漂移门槛（已验证）**：golden 三帧（f313 题面 / f4224 清单 / f4968 通法）改前改后 MD5 逐字节一致（f313=`c0b5d9b1b244e9cd8ef0c69c6f5c5797` 与 v0.2 四方对拍同值）——未触发内容 scale 恒 1，自适应零影响。
 
-**压力 fixture**（`scripts/fixtures/stress-content.json` + `stress-audio_meta.json`，结构与 golden 同构，仅测试用、绝不覆写 golden）：长题目行、47 字符 TeX 长公式、generalMethod 9 步。渲染实测：L1 长文字行缩至 0.77、L2 长公式行缩至 0.70 单行完整、L3 未触发保持原大；9 步列表缩至 0.61 全部入画。
+**压力 fixture**（`scripts/fixtures/stress-content.json` + `stress-audio_meta.json`，结构与 golden 同构，仅测试用、绝不覆写 golden）：长题目行、50 字符 TeX 长公式、generalMethod 9 步。渲染实测：L1 长文字行缩至 0.77、L2 长公式行缩至 0.661 单行完整、L3 未触发保持原大；9 步列表缩至 0.61 全部入画。（数字勘误 2026-08-31 评审独立复测：L2 实为 50 字符/0.661，渲染行为不变。）
 
 **已知限制**：① 系数为目验校准的经验值，KaTeX 段按 TeX 源字符数估算系统性偏高（偏保守安全侧）；② floor 兜底态在极端内容下仍可能残余溢出/贴边，依赖 QA 审帧拦截；③ 行级/列表级估算不含图片等非文本元素（模板当前无此类元素）。
