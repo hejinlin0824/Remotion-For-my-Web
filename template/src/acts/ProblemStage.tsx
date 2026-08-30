@@ -33,7 +33,7 @@ export const ProblemStage: React.FC<{ content: ContentJson; timeline: Timeline; 
   return (
     <div style={{ position: "absolute", left: rect.x, top: rect.y, width: rect.w, opacity: enter * exitFade }}>
       <div style={{ width: design.w, transform: `scale(${rect.w / design.w})`, transformOrigin: "top left" }}>
-        <ProblemPanel content={content} highlightId={anchor} compact={t === 1} />
+        <ProblemPanel content={content} highlightId={anchor} compact={t === 1} panelWidth={design.w} />
       </div>
     </div>
   );

@@ -204,3 +204,19 @@ python scripts/qa_glm.py
 - `scripts/pick_frames.mjs`：章节标题采样帧 +34（CHAPTER_REVEAL_F，避开扫入动画中段假阴性，commit `b0c470c`）。
 - `scripts/qa_stills.mjs`（新增，commit `a22dad6`）：单进程 bundle 一次逐帧 renderStill，替代逐帧 `npx remotion still`（各付 ~35s 冷启动）；29 帧 59-70s。
 - `scripts/qa_glm.py`：审帧并发化（ThreadPoolExecutor，默认 4，`QA_GLM_CONCURRENCY` 可调，commit `a234a18`）+ 逐帧错误归因落盘（`ERROR <frame>\t<摘要>` 行，commit `2d39d6a`）。判定语义/FAIL 标准/report 格式/exit 语义零变化。
+
+## 10. v0.3 变更记录（2026-08-30，动态自适应排版）
+
+**背景**：v0.2 的 nowrap 修复把「挤压崩坏」换成「超长横溢/裁切」，且通法步骤过多时列表超出画面下边界被裁切（E2E R2 job1 六轮同因）——生成侧随机重试救不了，模板必须具备确定性自适应能力（Task 15a，Ruling-16 v0.3 重封版）。
+
+**两类「动态放下」机制（全部纯函数确定性：无 DOM 测量、无 Math.random、无时钟、无异步；零新依赖）：**
+
+1. **ProblemPanel 行级宽度自适应**（`src/acts/components/ProblemPanel.tsx`）：按字符估算整行需求宽——CJK（含全角标点/「」）≈1.0em、ASCII/数字/半角标点≈0.55em、KaTeX math 段≈0.6em×TeX 源字符数（`src/engine/fit.ts` 共享估算函数）；超出该行可用宽度预算（`problemFull.w` 1400 − 面板 padding 2×40/2×24 − 面板 border 2×3 − 行 padding 2×18 − 高亮条 6 = 1272px）→ 整行 fontSize 按 budget/needed 等比缩小，**floor 0.6**。v0.2 的 nowrap+flexShrink:0 与 flexWrap 保留为前提；未触发行恒为 1（逐行独立判定）。
+2. **列表高度自适应**（`GeneralList.tsx` 通法列表 / `ChecklistCard.tsx` 检查清单）：估算总高（Σ 每步估行数×行高 1.4 + marginTop + chip 区）与可用高度预算（`main.h` 860 − CardShell padding 80 − border 4 − chip≈44 − chip marginBottom 26 ≈ 706px；ChecklistCard 另扣结论卡 220 偏移）比较，超出 → 整列表 fontSize/margin 按 budget/needed 等比缩小（字号缩小时估行数同步复算，`fitScale` 收敛式求解 needed(s)=budget 不动点），**floor 0.55**。lineHeight 用无单位系数/normal，随 fontSize 自动等比。
+3. **floor 兜底行为**：缩到下限仍放不下的极端内容 → clamp 在 floor 照常渲染（残余溢出由 QA 审帧几何 FAIL 兜底拦截、驳回重生成）。单测见 `src/engine/fit.test.ts`（15 例，含 floor 兜底与确定性）。
+
+**零漂移门槛（已验证）**：golden 三帧（f313 题面 / f4224 清单 / f4968 通法）改前改后 MD5 逐字节一致（f313=`c0b5d9b1b244e9cd8ef0c69c6f5c5797` 与 v0.2 四方对拍同值）——未触发内容 scale 恒 1，自适应零影响。
+
+**压力 fixture**（`scripts/fixtures/stress-content.json` + `stress-audio_meta.json`，结构与 golden 同构，仅测试用、绝不覆写 golden）：长题目行、47 字符 TeX 长公式、generalMethod 9 步。渲染实测：L1 长文字行缩至 0.77、L2 长公式行缩至 0.70 单行完整、L3 未触发保持原大；9 步列表缩至 0.61 全部入画。
+
+**已知限制**：① 系数为目验校准的经验值，KaTeX 段按 TeX 源字符数估算系统性偏高（偏保守安全侧）；② floor 兜底态在极端内容下仍可能残余溢出/贴边，依赖 QA 审帧拦截；③ 行级/列表级估算不含图片等非文本元素（模板当前无此类元素）。

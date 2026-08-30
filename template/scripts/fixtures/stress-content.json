@@ -1,0 +1,89 @@
+{
+  "meta": { "aspect": "16:9", "problemType": "计算题" },
+  "problem": {
+    "lines": [
+      { "id": "L1", "segments": [
+        { "type": "text", "value": "已知定义在全体实数上且图象连续不断的函数 " },
+        { "type": "math", "value": "f(x)" },
+        { "type": "text", "value": " 满足下列三个条件：" }
+      ]},
+      { "id": "L2", "segments": [
+        { "type": "text", "value": "当 " },
+        { "type": "math", "value": "x \\ge 0" },
+        { "type": "text", "value": " 时，" },
+        { "type": "math", "value": "f(x)=\\frac{x^{3}}{3}+ax^{2}+4x+\\ln(x^{2}+1)+\\sin x" },
+        { "type": "text", "value": "，" }
+      ]},
+      { "id": "L3", "segments": [
+        { "type": "text", "value": "求实数 " },
+        { "type": "math", "value": "a" },
+        { "type": "text", "value": " 的取值范围。" }
+      ]}
+    ]
+  },
+  "knowledge": [
+    { "claim": "可导函数在区间上单调递增，等价于导数在该区间恒非负",
+      "formula": "f(x)\\text{ 在 }I\\text{ 单调递增}\\iff f'(x)\\ge 0",
+      "premise": "f(x) 在区间内可导；考纲默认单调递增允许导数个别零点",
+      "trap": "写成 f'(x)>0 会漏掉临界情形" },
+    { "claim": "含 ln 与 sin 的混合式先确认定义域再求导",
+      "formula": "(\\ln u)'=\\frac{u'}{u},\\quad (\\sin x)'=\\cos x",
+      "premise": "ln 的真数必须恒正，定义域限制要单独成行",
+      "trap": "对复合结构漏乘内层导数" },
+    { "claim": "恒成立问题优先转化为函数最值或判别式",
+      "formula": "f(x)\\ge 0\\ \\text{在}\\ I\\ \\text{恒成立}\\iff f(x)_{\\min}\\ge 0",
+      "premise": "二次结构优先判别式；参数能干净分离时用分离参数",
+      "trap": "端点开闭要单独检验取等情形" }
+  ],
+  "steps": [
+    { "usesAnchor": "L2", "statement": "对 f(x) 求导并整理",
+      "derivation": "f'(x)=x^{2}+2ax+4+\\frac{2x}{x^{2}+1}+\\cos x", "note": "混合式逐项求导，ln 项用商法则" },
+    { "usesAnchor": "L2", "statement": "把单调递增翻译成导数恒非负",
+      "derivation": "f'(x)\\ge 0\\ \\text{对任意}\\ x\\ge 0\\ \\text{恒成立}", "note": "这是整道题的关键转化" },
+    { "usesAnchor": "L2", "statement": "分离出参数 a 的恒成立结构",
+      "derivation": "2ax\\ge -\\left(x^{2}+4+\\frac{2x}{x^{2}+1}+\\cos x\\right)", "note": "x>0 时两边同除不改变方向" },
+    { "usesAnchor": "L3", "statement": "对右边求最大值并解出 a",
+      "derivation": "a\\ge \\frac{1}{2}\\ \\text{即}\\ a\\in\\left[\\frac{1}{2},+\\infty\\right)", "note": "最值点用单调性说明存在性" },
+    { "usesAnchor": "L3", "statement": "写出最终结论并回验端点",
+      "derivation": "a\\in\\left[\\frac{1}{2},+\\infty\\right)", "note": "a=1/2 时取等情形单独验证" }
+  ],
+  "pitfalls": [
+    { "claim": "不写定义域就直接对 ln(x^2+1) 求导", "why": "真数恒正此处虽成立，但理由必须交代，跳步会被扣分" },
+    { "claim": "两边同除 x 时忽略 x=0 的临界情形", "why": "x=0 处要单独代回原条件验证，方向改变必须讨论" }
+  ],
+  "generalMethod": [
+    { "step": "识别：可导函数 + 区间上单调递增的条件结构", "trick": "立刻联想「导数恒定号」的翻译套路" },
+    { "step": "转化：把单调性翻译成导数在区间上恒成立", "trick": "含参二次优先判别式；能分离参数就分离参数" },
+    { "step": "求解：解出参数的取值范围并注意端点开闭", "trick": "取等情形必须代回原题验证单调性与定义域" },
+    { "step": "回验：把结论代回原条件逐条核对不跳步", "trick": "定义域优先，含 ln 与根号先写限制再化简" },
+    { "step": "规范：设、译、解、验、答五步缺一不可", "trick": "解答题按步给分，转化语句要单独成行写明" },
+    { "step": "提速：常见三次式求导结果要形成条件反射", "trick": "幂函数法则逐项处理，常数项求导直接归零" },
+    { "step": "防错：判别式等于零的临界情形单独检验", "trick": "端点开闭与单调性证明书写规范要背熟" },
+    { "step": "迁移：恒成立与零点问题共用同一套转化", "trick": "分离参数后盯住新函数的最值，勿忘定义域" },
+    { "step": "复盘：错题按「错在哪一步」归档进错题本", "trick": "每周重做一遍标记题，直到条件反射为止" }
+  ],
+  "scenes": [
+    { "id": "s01", "act": 2, "component": "problem-card", "ttsText": "我们先看这道压轴题，题目很长，信息量很大，大家注意审题。", "props": {} },
+    { "id": "s02", "act": 2, "component": "knowledge-card", "ttsText": "第一件事，回顾单调性与导数的关系这个核心考点。", "props": { "knowledgeRef": 1 } },
+    { "id": "s03", "act": 2, "component": "knowledge-card", "ttsText": "混合函数求导，先确认定义域，再逐项处理。", "props": { "knowledgeRef": 2 } },
+    { "id": "s04", "act": 2, "component": "knowledge-card", "ttsText": "恒成立问题的两条转化路径，判别式法和分离参数法。", "props": { "knowledgeRef": 3 } },
+    { "id": "s05", "act": 3, "component": "step-card", "ttsText": "进入解法。第一步，对混合函数逐项求导并整理。", "props": { "stepRef": 1 } },
+    { "id": "s06", "act": 3, "component": "derivation-popup", "ttsText": "求导细节单独放大看一遍，注意 ln 项用商法则。", "props": { "stepRef": 1, "formula": "f'(x)=x^{2}+2ax+4+\\frac{2x}{x^{2}+1}+\\cos x" } },
+    { "id": "s07", "act": 3, "component": "step-card", "ttsText": "第二步，把单调递增翻译成导数恒非负。", "props": { "stepRef": 2 } },
+    { "id": "s08", "act": 3, "component": "step-card", "ttsText": "第三步，分离出参数 a 的恒成立结构。", "props": { "stepRef": 3 } },
+    { "id": "s09", "act": 3, "component": "step-card", "ttsText": "第四步，对右边求最大值并解出 a 的范围。", "props": { "stepRef": 4 } },
+    { "id": "s10", "act": 3, "component": "step-card", "ttsText": "第五步，写出最终结论并回验端点。", "props": { "stepRef": 5 } },
+    { "id": "s11", "act": 3, "component": "pitfall-card", "ttsText": "第一个易错点：不写定义域就直接求导。", "props": { "pitfallRef": 1 } },
+    { "id": "s12", "act": 3, "component": "pitfall-card", "ttsText": "第二个易错点：同除 x 时忽略临界情形。", "props": { "pitfallRef": 2 } },
+    { "id": "s13", "act": 3, "component": "checklist-card", "ttsText": "做完对一下清单，两个检查点逐条过。", "props": { "pitfallRefs": [1, 2] } },
+    { "id": "s14", "act": 4, "component": "general-list", "ttsText": "以后怎么做？第一步，识别条件结构。", "props": { "itemRef": 1 } },
+    { "id": "s15", "act": 4, "component": "general-list", "ttsText": "第二步，转化成恒成立。", "props": { "itemRef": 2 } },
+    { "id": "s16", "act": 4, "component": "general-list", "ttsText": "第三步，求解参数范围。", "props": { "itemRef": 3 } },
+    { "id": "s17", "act": 4, "component": "general-list", "ttsText": "第四步，回验不跳步。", "props": { "itemRef": 4 } },
+    { "id": "s18", "act": 4, "component": "general-list", "ttsText": "第五步，书写要规范。", "props": { "itemRef": 5 } },
+    { "id": "s19", "act": 4, "component": "general-list", "ttsText": "第六步，求导要提速。", "props": { "itemRef": 6 } },
+    { "id": "s20", "act": 4, "component": "general-list", "ttsText": "第七步，临界要防错。", "props": { "itemRef": 7 } },
+    { "id": "s21", "act": 4, "component": "general-list", "ttsText": "第八步，迁移到同类题。", "props": { "itemRef": 8 } },
+    { "id": "s22", "act": 4, "component": "general-list", "ttsText": "第九步，复盘进错题本。这套九步流程请收好。", "props": { "itemRef": 9 } }
+  ]
+}

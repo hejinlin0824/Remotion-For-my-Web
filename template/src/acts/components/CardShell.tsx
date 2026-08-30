@@ -11,10 +11,11 @@ export const CardShell: React.FC<{ chip: string; accent?: string; children: Reac
   </div>
 );
 
-export const Row: React.FC<{ label: string; text: string; color: string }> = ({ label, text, color }) => (
-  <div style={{ display: "flex", gap: 18, alignItems: "baseline", marginTop: 22 }}>
-    <span style={{ flexShrink: 0, fontSize: 26, fontWeight: 700, color: COLORS.ink,
+export const Row: React.FC<{ label: string; text: string; color: string; scale?: number }> =
+({ label, text, color, scale = 1 }) => (
+  <div style={{ display: "flex", gap: 18, alignItems: "baseline", marginTop: 22 * scale }}>
+    <span style={{ flexShrink: 0, fontSize: 26 * scale, fontWeight: 700, color: COLORS.ink,
       backgroundColor: color, borderRadius: 8, padding: "2px 14px" }}>{label}</span>
-    <span style={{ fontSize: 32, color: COLORS.text, lineHeight: 1.4 }}>{text}</span>
+    <span style={{ fontSize: 32 * scale, color: COLORS.text, lineHeight: 1.4 }}>{text}</span>
   </div>
 );

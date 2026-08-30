@@ -15,14 +15,16 @@ export const Act4Method: React.FC<{ content: ContentJson; timeline: Timeline; la
     <div style={{ position: "absolute", left: layout.main.x, top: layout.main.y,
       width: layout.main.w, height: layout.main.h }}>
       <Sequence from={start} durationInFrames={span}>
-        <Act4Inner content={content} timeline={timeline} span={span} shown={shown} start={start} />
+        <Act4Inner content={content} timeline={timeline} span={span} shown={shown} start={start}
+          availWidth={layout.main.w} availHeight={layout.main.h} />
       </Sequence>
     </div>
   );
 };
 
 const Act4Inner: React.FC<{ content: ContentJson; timeline: Timeline; span: number;
-  shown: number; start: number }> = ({ content, timeline, span, shown, start }) => {
+  shown: number; start: number; availWidth: number; availHeight: number }> =
+({ content, timeline, span, shown, start, availWidth, availHeight }) => {
   const f = useCurrentFrame();
   const scenes = timeline.scenes.filter((w) => w.act === 4);
   let activeIndex = 0;
@@ -31,6 +33,7 @@ const Act4Inner: React.FC<{ content: ContentJson; timeline: Timeline; span: numb
   }
   return (
     <GeneralList items={content.generalMethod.slice(0, shown)} activeIndex={activeIndex}
-      starts={scenes.map((w) => w.startFrame - start)} span={span} />
+      starts={scenes.map((w) => w.startFrame - start)} span={span}
+      availWidth={availWidth} availHeight={availHeight} />
   );
 };

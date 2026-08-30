@@ -85,7 +85,8 @@ export const Act3Solution: React.FC<{ content: ContentJson; timeline: Timeline; 
                 )}
                 {head.component === "checklist-card" && (
                   <ChecklistCard pitfalls={head.props.pitfallRefs!.map((r) => content.pitfalls[r - 1])}
-                    durFrames={span} />
+                    durFrames={span}
+                    availWidth={layout.main.w} availHeight={layout.main.h - (needOffset ? 220 : 0)} />
                 )}
               </Sequence>
             );

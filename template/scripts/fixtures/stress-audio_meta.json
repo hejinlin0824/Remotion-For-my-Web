@@ -1,0 +1,36 @@
+{
+  "voice": "Cherry",
+  "model": "qwen-tts",
+  "rate": 1.0,
+  "fps": 30,
+  "breathSec": 0.18,
+  "act5TailSec": 2.0,
+  "fixed": {
+    "act1": { "file": "audio/fixed/act1.wav", "durationSec": 5.201 },
+    "act5": { "file": "audio/fixed/act5.wav", "durationSec": 5.901 }
+  },
+  "lines": [
+    { "index": 1,  "sceneId": "s01", "file": "audio/lines/line_01.wav", "durationSec": 7.0,   "text": "stress fixture" },
+    { "index": 2,  "sceneId": "s02", "file": "audio/lines/line_02.wav", "durationSec": 6.5,   "text": "stress fixture" },
+    { "index": 3,  "sceneId": "s03", "file": "audio/lines/line_03.wav", "durationSec": 5.5,   "text": "stress fixture" },
+    { "index": 4,  "sceneId": "s04", "file": "audio/lines/line_04.wav", "durationSec": 6.0,   "text": "stress fixture" },
+    { "index": 5,  "sceneId": "s05", "file": "audio/lines/line_05.wav", "durationSec": 6.5,   "text": "stress fixture" },
+    { "index": 6,  "sceneId": "s06", "file": "audio/lines/line_06.wav", "durationSec": 7.0,   "text": "stress fixture" },
+    { "index": 7,  "sceneId": "s07", "file": "audio/lines/line_07.wav", "durationSec": 6.0,   "text": "stress fixture" },
+    { "index": 8,  "sceneId": "s08", "file": "audio/lines/line_08.wav", "durationSec": 6.0,   "text": "stress fixture" },
+    { "index": 9,  "sceneId": "s09", "file": "audio/lines/line_09.wav", "durationSec": 6.5,   "text": "stress fixture" },
+    { "index": 10, "sceneId": "s10", "file": "audio/lines/line_10.wav", "durationSec": 6.0,   "text": "stress fixture" },
+    { "index": 11, "sceneId": "s11", "file": "audio/lines/line_11.wav", "durationSec": 5.5,   "text": "stress fixture" },
+    { "index": 12, "sceneId": "s12", "file": "audio/lines/line_12.wav", "durationSec": 5.5,   "text": "stress fixture" },
+    { "index": 13, "sceneId": "s13", "file": "audio/lines/line_13.wav", "durationSec": 5.0,   "text": "stress fixture" },
+    { "index": 14, "sceneId": "s14", "file": "audio/lines/line_14.wav", "durationSec": 4.5,   "text": "stress fixture" },
+    { "index": 15, "sceneId": "s15", "file": "audio/lines/line_15.wav", "durationSec": 4.0,   "text": "stress fixture" },
+    { "index": 16, "sceneId": "s16", "file": "audio/lines/line_16.wav", "durationSec": 4.0,   "text": "stress fixture" },
+    { "index": 17, "sceneId": "s17", "file": "audio/lines/line_17.wav", "durationSec": 4.0,   "text": "stress fixture" },
+    { "index": 18, "sceneId": "s18", "file": "audio/lines/line_18.wav", "durationSec": 4.0,   "text": "stress fixture" },
+    { "index": 19, "sceneId": "s19", "file": "audio/lines/line_19.wav", "durationSec": 4.0,   "text": "stress fixture" },
+    { "index": 20, "sceneId": "s20", "file": "audio/lines/line_20.wav", "durationSec": 4.0,   "text": "stress fixture" },
+    { "index": 21, "sceneId": "s21", "file": "audio/lines/line_21.wav", "durationSec": 4.5,   "text": "stress fixture" },
+    { "index": 22, "sceneId": "s22", "file": "audio/lines/line_22.wav", "durationSec": 6.0,   "text": "stress fixture" }
+  ]
+}
