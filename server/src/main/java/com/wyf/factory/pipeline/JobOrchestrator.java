@@ -47,7 +47,12 @@ import java.util.concurrent.Executor;
 import java.util.function.IntConsumer;
 
 /**
- * 编排器（plan Task 10）：领单 → 状态机推进 → 终态收尾。
+ * 编排器（plan Task 10 + Ruling-18 QA 前置）：领单 → 状态机推进 → 终态收尾。
+ *
+ * <p>阶段序（Ruling-18，2026-08-30）：QUEUED→EXTRACTING→GENERATING→REVIEWING→SPEAKING→
+ * <b>QA（still 预审）→RENDERING→DONE</b>——审帧帧本就由 qa_stills 从 composition 直接 renderStill
+ * （不依赖成片视频），pick_frames 帧号只依赖 TTS 后 timeline，TTS 完成即具备 QA 全部输入；
+ * 驳回循环不再白付整片渲染。渲染成功即 DONE，<b>渲染后不再有 QA 轮</b>。</p>
  *
  * <ul>
  *   <li><b>领单</b>（{@link JobRepository} javadoc 协议）：{@link #poll()} 查最旧 QUEUED →
@@ -56,18 +61,19 @@ import java.util.function.IntConsumer;
  *   <li><b>断点续跑</b>：process 按 DB 当前 status 从断点阶段继续；
  *       workspace/{jobId}/src/data/content.json 存在 → 跳过 EXTRACTING/GENERATING（ContentJson.readFrom 读回）；
  *       audio_meta.json 存在且 lines wav 数齐 → 跳过 SPEAKING（AudioMeta.readFrom + wav 读回内存）；
- *       artifacts/{jobId}/final.mp4 存在 → 跳过 RENDERING。ExtractResult 不可恢复时
- *       V2 以 content.json problem 段为基准（历史 note 记录）。</li>
+ *       content 来自盘上续跑且工作区在盘 → QA 原地复用工作区（out/qa 产物保留，三工具就地覆写重审）；
+ *       artifacts/{jobId}/final.mp4 存在 → 渲染已完成，直接 DONE 归档（渲染后无 QA 轮）。
+ *       ExtractResult 不可恢复时 V2 以 content.json problem 段为基准（历史 note 记录）。</li>
  *   <li><b>取消</b>：每阶段开始前重读最新 Job 查 cancelRequested；SPEAKING 前可取消
  *       （enterStage CANCELLED + workspace 清理 + 不产 artifacts + 回调）；渲染中不打断（spec §11）。</li>
  *   <li><b>TOCTOU 兜底</b>（T3 评审 M 项）：任何 save 撞乐观锁（如 cancel 并发落库）→ 重读一次
  *       以库内最新状态继续循环，绝不向上抛 500。</li>
  *   <li><b>失败分类</b>（spec §14）：校验驳回 / QA 判负（Ruling-17：带 FAIL 清单回 GENERATING
- *       重生成）/ retryable GlmException / retryable RenderException
+ *       重生成，Ruling-18 后发生在渲染之前）/ retryable GlmException / retryable RenderException
  *       → 预算内重试（reviewRetries、genRetries、extractRetries、qaRounds）；
  *       FatalExtractException / TtsFatalException / 预算尽 → FAILED（errorMessage + lastError=堆栈尾
  *       2000 字符 + workspace 保留 + 回调）。</li>
- *   <li><b>DONE</b>：artifactsDir 以绝对路径落库（GET /video 按 artifactsDir 直读 final.mp4，
+ *   <li><b>DONE</b>（渲染收尾）：artifactsDir 以绝对路径落库（GET /video 按 artifactsDir 直读 final.mp4，
  *       与 JobService.videoPath 对齐）、workspace 清理（artifacts 保留）、可选回调。</li>
  * </ul>
  */
@@ -265,7 +271,7 @@ public class JobOrchestrator {
             }
             job = fresh;
             // 取消检查点（每阶段开始前）：SPEAKING 前阶段间可取消；
-            // RENDERING/QA 完成后的检查点在 doRendering/doQa 内（成片丢弃）
+            // RENDERING/QA 完成后的检查点在 doRendering/doQa 内（M2）
             if (job.isCancelRequested() && JobStatus.canTransit(job.getStatus(), JobStatus.CANCELLED)) {
                 job = doCancel(job, ctx);
                 if (job == null || job.getStatus().isTerminal()) {
@@ -390,7 +396,7 @@ public class JobOrchestrator {
 
     private Job doSpeaking(Job job, Ctx ctx) {
         if (ctx.audioMeta != null) {
-            return enterAndSave(job, JobStatus.RENDERING, "断点续跑：audio_meta.json 与台词 wav 已在盘，跳过 TTS");
+            return enterAndSave(job, JobStatus.QA, "断点续跑：audio_meta.json 与台词 wav 已在盘，跳过 TTS");
         }
         final Path staging;
         try {
@@ -402,7 +408,8 @@ public class JobOrchestrator {
             AudioMeta meta = semaphores.withTts(() -> ttsPipeline.synthesizeAll(ctx.content, staging));
             ctx.audioMeta = meta;
             ctx.lineWavs = readLineWavs(staging, meta.getLines().size());
-            return enterAndSave(job, JobStatus.RENDERING, "TTS 完成（" + meta.getLines().size() + " 句）");
+            // Ruling-18：TTS 完成 → 时间轴（pick_frames 输入）齐备，直接进 QA still 预审（渲染之前）
+            return enterAndSave(job, JobStatus.QA, "TTS 完成（" + meta.getLines().size() + " 句），进入 QA 预审");
         } catch (TtsPipeline.TtsFatalException fatal) {
             // 某句全尝试 + 整批重录仍失败（Global Constraint 3），重试无意义
             return failJob(job, fatal.getMessage(), fatal, ctx);
@@ -413,17 +420,24 @@ public class JobOrchestrator {
 
     // ------------------------------------------------------------------ 阶段：RENDERING
 
+    /**
+     * 渲染（Ruling-18：全链只走一次，成功即 DONE——渲染后无 QA 轮）。
+     * 正常链路工作区已由 QA 预审建好（ctx.workspace），此处原地复用不重建；
+     * 仅续跑直达 RENDERING（本轮未跑 QA）时现建。
+     */
     private Job doRendering(Job job, Ctx ctx) throws InterruptedException {
         if (Files.isRegularFile(artifactsFinal(job.getId()))) {
-            return enterAndSave(job, JobStatus.QA, "断点续跑：final.mp4 已在盘，跳过渲染");
+            // 渲染已完成但 DONE 未落库的窗口期中断 → 直接归档收尾，不重渲也不再 QA
+            return finishDone(job, ctx, "断点续跑：final.mp4 已在盘，跳过渲染，成片归档");
         }
         // 协作者声明 InterruptedException，无法进 Supplier：手动 acquire/release（一次一闸，无嵌套）。
         // 渲染进行中不打断（spec §11）；完成后的取消检查点在闸外（M2）
+        if (ctx.workspace == null) {
+            ctx.workspace = workspaceManager.create(job.getId(), ctx.content, ctx.audioMeta, ctx.lineWavs);
+        }
         semaphores.render().acquire();
         try {
-            Path ws = workspaceManager.create(job.getId(), ctx.content, ctx.audioMeta, ctx.lineWavs);
-            ctx.workspace = ws;
-            Path mp4 = renderWorker.render(ws);   // 全片渲染（QA 轮次重渲同样走这里，不复用短渲）
+            Path mp4 = renderWorker.render(ctx.workspace);   // 全片渲染（不复用短渲）
             ctx.artifactsDir = mp4.getParent();
         } catch (RenderWorker.RenderException e) {
             // failJob 只落库+挂起回调，notify 在 loop 层（闸外）执行——I3
@@ -434,40 +448,52 @@ public class JobOrchestrator {
         if (job.isCancelRequested()) {
             return cancelAfterWork(job, ctx);   // M2：渲染完成后检查点 → CANCELLED + 成片丢弃
         }
-        return enterAndSave(job, JobStatus.QA, "渲染完成，进入审帧 QA");
+        return finishDone(job, ctx, "渲染完成，成片归档");
     }
 
     // ------------------------------------------------------------------ 阶段：QA
 
+    /**
+     * QA still 预审（Ruling-18：渲染之前）——pick_frames + qa_stills + qa_glm 三步原样复用
+     * （三工具零改动，本就不依赖成片视频）。首进 QA 时渲染未发生，审帧工作区在此现建；
+     * 断点续跑且 content 来自盘上 → 原地复用工作区（out/qa 产物保留，三工具就地覆写重审，
+     * 沿用现 QA 续跑语义：不跳过重审，只复用工作区与产物目录）。
+     */
     private Job doQa(Job job, Ctx ctx) throws InterruptedException {
-        Path ws = ctx.workspace != null ? ctx.workspace : workspaceManager.workspacePath(job.getId());
+        if (ctx.workspace == null) {
+            Path existing = workspaceManager.workspacePath(job.getId());
+            ctx.workspace = ctx.contentResumed && existing != null && Files.isDirectory(existing)
+                    ? existing
+                    : workspaceManager.create(job.getId(), ctx.content, ctx.audioMeta, ctx.lineWavs);
+        }
         semaphores.qa().acquire();
         QaFrameCheck.QaResult result;
         try {
-            result = qaFrameCheck.check(ws);
+            result = qaFrameCheck.check(ctx.workspace);
         } catch (RenderWorker.RenderException e) {
             return renderRetryOrFail(job, e, ctx);
         } finally {
             semaphores.qa().release();
         }
         if (job.isCancelRequested()) {
-            return cancelAfterWork(job, ctx);   // M2：QA 完成后检查点（即使审帧通过也不 DONE）
+            return cancelAfterWork(job, ctx);   // M2：预审完成后检查点（即使审帧通过也不渲染）
         }
         if (result.pass()) {
-            return finishDone(job, ctx, result.framesChecked());
+            return enterAndSave(job, JobStatus.RENDERING,
+                    "QA 预审通过（" + result.framesChecked() + " 帧），进入渲染");
         }
         return qaRetryOrFail(job, result, ctx);
     }
 
     // ------------------------------------------------------------------ 终态收尾
 
-    private Job finishDone(Job job, Ctx ctx, int framesChecked) {
+    private Job finishDone(Job job, Ctx ctx, String note) {
         Path artifacts = ctx.artifactsDir != null
                 ? ctx.artifactsDir
                 : Path.of(props.getArtifactsDir()).resolve(job.getId());
         // 绝对路径落库：JobService.videoPath 直接 Path.of(artifactsDir, "final.mp4") 读文件
         job.setArtifactsDir(artifacts.toAbsolutePath().normalize().toString());
-        job.enterStage(JobStatus.DONE, "QA 通过（" + framesChecked + " 帧），成片归档");
+        job.enterStage(JobStatus.DONE, note);
         saveTolerant(job);
         cleanupWorkspaceQuietly(job.getId());
         deferCallback(job, JobStatus.DONE, null, ctx);   // I3：闸外发（loop 层）
@@ -486,7 +512,7 @@ public class JobOrchestrator {
             return saved;   // TOCTOU：CANCELLED 写入被并发落库顶掉 → 以库内最新状态继续，下轮检查点再来
         }
         if (before == JobStatus.RENDERING || before == JobStatus.QA) {
-            discardArtifactsQuietly(job.getId());   // M2：渲染/审帧阶段取消 → 丢弃残留成片
+            discardArtifactsQuietly(job.getId());   // M2：渲染阶段取消 → 丢弃成片（QA 阶段渲染未发生，deleteIfExists 兜底）
         }
         cleanupWorkspaceQuietly(job.getId());
         deferCallback(job, JobStatus.CANCELLED, null, ctx);
@@ -494,12 +520,13 @@ public class JobOrchestrator {
     }
 
     /**
-     * 渲染/QA 完成后的取消检查点（修复轮 M2）：成片已产出 → 丢弃不入 artifacts
-     * （删除 artifacts/{jobId}/final.mp4），清理工作区，回调 CANCELLED。
+     * 渲染/QA 完成后的取消检查点（修复轮 M2）：渲染路径成片已产出 → 丢弃不入 artifacts
+     * （删除 artifacts/{jobId}/final.mp4）；QA 路径（Ruling-18：预审先于渲染）无成片可丢，
+     * 仅清理工作区；统一回调 CANCELLED。
      */
     private Job cancelAfterWork(Job job, Ctx ctx) {
-        log.info("job={} 渲染/审帧完成发现取消标记 → CANCELLED（成片丢弃）", job.getId());
-        job.enterStage(JobStatus.CANCELLED, "用户取消（渲染/QA 完成后检查点，成片丢弃）");
+        log.info("job={} 渲染/预审完成发现取消标记 → CANCELLED", job.getId());
+        job.enterStage(JobStatus.CANCELLED, "用户取消（渲染/QA 完成后检查点）");
         Job saved = saveTolerant(job);
         if (saved == null) {
             return null;
@@ -542,18 +569,19 @@ public class JobOrchestrator {
     }
 
     /**
-     * 渲染/QA 链失败预算：与 QA 轮次共用 qaRounds（画面类失败与审帧同属"渲染-审帧"循环，
-     * 上限 app.qa.maxRounds）。RENDERING 中就地重渲；QA 中回退 RENDERING（canTransit QA→RENDERING）。
+     * 渲染/审帧链失败预算：与 QA 轮次共用 qaRounds（画面类失败与审帧同属"渲染-预审"循环，
+     * 上限 app.qa.maxRounds）。RENDERING 中就地重渲；QA 中（Ruling-18）就地重审——
+     * 审帧链异常发生在渲染之前，「回退重渲」路由已废弃：渲染成功即 DONE，回退会让
+     * 未审成片直达 DONE。两条就地分支均不发生状态迁移（canTransit(X,X)=false）。
      * 修复轮 I2：!isRetryable 的渲染异常（配置/内容性失败）直接 FAILED，不进循环。
      *
      * <p>与 {@link #qaRetryOrFail} 的分工（Ruling-17）：本方法只处理渲染/审帧链<b>异常</b>
-     * （exit≠0/超时等环境性失败，就地/回退重渲）；QA <b>判负</b>（审帧出了 FAIL 清单）走
+     * （exit≠0/超时等环境性失败，就地重试）；QA <b>判负</b>（审帧出了 FAIL 清单）走
      * qaRetryOrFail 回 GENERATING 重生成，不在本方法重试。</p>
      *
-     * <p>T12 F4 复盘：就地重渲分支不发生状态迁移（canTransit(RENDERING,RENDERING)=false），
-     * 按设计不落 stageHistory——历史只记 canTransit 成功的 ENTER，痕迹是 qaRounds/lastError。
-     * E2E 报告曾把 job1 的 qa=1 误读作「QA→RENDERING→QA 两条迁移丢 history」，
-     * 原始 30s 轮询证实迁移从未发生（RENDERING 连续、qa=1 后无第二次 +1）。</p>
+     * <p>T12 F4 复盘：就地分支不发生状态迁移，按设计不落 stageHistory——历史只记
+     * canTransit 成功的 ENTER，痕迹是 qaRounds/lastError（Ruling-18 后原 QA→RENDERING→QA
+     * 双 ENTER 回归用例改为就地重审断言，见 JobOrchestratorTest F4 回归）。</p>
      */
     private Job renderRetryOrFail(Job job, RenderWorker.RenderException e, Ctx ctx) {
         if (!e.isRetryable()) {
@@ -562,11 +590,8 @@ public class JobOrchestrator {
         if (job.getQaRounds() < props.getQa().getMaxRounds()) {
             job.setQaRounds(job.getQaRounds() + 1);
             job.setLastError(tail(String.valueOf(e.getMessage()), LAST_ERROR_TAIL));
-            if (job.getStatus() == JobStatus.RENDERING) {
-                saveTolerant(job);
-                return job;   // 就地重渲
-            }
-            return enterAndSave(job, JobStatus.RENDERING, "审帧链异常，回退重渲染");
+            saveTolerant(job);
+            return job;   // RENDERING 就地重渲 / QA 就地重审（留原状态，循环重跑本阶段）
         }
         return failJob(job, "渲染/审帧链失败预算（" + props.getQa().getMaxRounds() + "）耗尽：" + e.getMessage(), e, ctx);
     }
@@ -575,14 +600,14 @@ public class JobOrchestrator {
      * QA 判负路由（Ruling-17 结构性主修，R2 实证驱动）：QA 判负 ≠ 环境性失败——job1 六轮
      * 驳回同因（结论卡折行类生成内容缺陷），盲重渲 6/6 复现同缺陷，随机重试对几何溢出类
      * 缺陷命中率极低。故预算内判负 → <b>带 FAIL 清单回 GENERATING 重生成</b>（与 V1-V4 驳回
-     * 同一机制、同一错误注入通道），素材/剧本/TTS/渲染随之自然重做；qaRounds 继续计数，
-     * 第 maxRounds 轮判负 → FAILED。
+     * 同一机制、同一错误注入通道），素材/剧本/TTS 随之自然重做（Ruling-18：预审本就先于渲染，
+     * 驳回循环零渲染成本）；qaRounds 继续计数，第 maxRounds 轮判负 → FAILED。
      *
      * <p>F2-R2 off-by-one 修复：先自增后比较（qaRounds = 已消耗轮数），maxRounds=5 恰好
      * 5 次 QA 判定——旧代码先比较后自增实跑 6 判 6 渲，第 6 判负才 FAILED 且报文仍称 5 轮。</p>
      *
-     * <p>分工边界：本方法只服务 QA <b>判负</b>；渲染/QA 链异常（exit≠0/超时等环境性失败）
-     * 走 {@link #renderRetryOrFail} 的就地重渲/回退重渲路径，保持不变。</p>
+     * <p>分工边界：本方法只服务 QA <b>判负</b>；渲染/审帧链异常（exit≠0/超时等环境性失败）
+     * 走 {@link #renderRetryOrFail} 的就地重渲/就地重审路径，保持不变。</p>
      */
     private Job qaRetryOrFail(Job job, QaFrameCheck.QaResult result, Ctx ctx) {
         int round = job.getQaRounds() + 1;
@@ -597,11 +622,13 @@ public class JobOrchestrator {
             ctx.reviewErrors = List.copyOf(errors);
             // 修复轮 I1 同理：清续跑标记——QA 驳回后 GENERATING 必须真正重生成
             ctx.contentResumed = false;
-            // 剧本将重生成 → 旧 TTS 音频/台词 wav 全部作废，SPEAKING 必须整段重录
+            // 剧本将重生成 → 旧 TTS 音频/台词 wav/工作区（含旧 content.json 与旧 qa 产物）全部作废，
+            // SPEAKING 整段重录、下轮 QA 按新剧本现建工作区
             ctx.audioMeta = null;
             ctx.lineWavs = Map.of();
+            ctx.workspace = null;
             job.setLastError(tail(fails, LAST_ERROR_TAIL));
-            discardStaleFinalQuietly(job);   // 既有路径：删旧成片，防 RENDERING 断点判定跳过重渲
+            discardStaleFinalQuietly(job);   // 防御残留旧成片：防 RENDERING 断点判定跳过唯一一次渲染
             return enterAndSaveAndReturn(job, JobStatus.GENERATING,
                     "QA 未过（第 " + round + " 轮），FAIL 清单回传重生成");
         }
@@ -609,10 +636,10 @@ public class JobOrchestrator {
     }
 
     /**
-     * QA 判负/重渲路由前丢弃上轮被判废的成片（golden 2026-08-29 实测 bug）：doRendering 入口以
-     * {@code final.mp4 已在盘} 判定断点续跑跳过渲染，不删旧片则「全片重渲染」永不发生，
-     * QA 逐轮复审同一批废帧直至预算耗尽（QA 重试机制整体空转）。Ruling-17 的 QA→GENERATING
-     * 路由同样必须先删——重生成后的重渲才能真实发生。
+     * QA 判负路由前丢弃可能的残留成片（golden 2026-08-29 实测 bug）：doRendering 入口以
+     * {@code final.mp4 已在盘} 判定「渲染已完成」直接归档收尾，残留旧片不删则唯一一次渲染
+     * 不发生、DONE 落在过期成片上。Ruling-18 新链路 QA 先于渲染、本无成片可言，此删除保留
+     * 为对升级窗口期（旧版在途任务：QA 判负时 artifacts 已有前一轮成片）的防御。
      */
     private void discardStaleFinalQuietly(Job job) {
         try {

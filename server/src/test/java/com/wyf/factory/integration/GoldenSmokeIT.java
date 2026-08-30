@@ -63,7 +63,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * {@link com.wyf.factory.domain.StageHistoryEntry}.STATE_EXIT 全库无写入点），
  * 故"全部 7 个阶段的历史记录"按 ENTER 断言；QA report.md 存活在 workspace
  * out/qa/（DONE 收尾即整删 workspace，存活秒级窗口），测试以 1s 粒度看护线程
- * 尽力快照，另以 DONE 历史条目 note 内"QA 通过（N 帧）"作为审帧通过的最强证据。</p>
+ * 尽力快照，另以 QA 历史条目 note 内"QA 预审通过（N 帧）"作为审帧通过的最强证据
+ * （Ruling-18：DONE 由渲染收尾，审帧通过证据在 QA→RENDERING 的 ENTER note）。</p>
  *
  * <p>状态（2026-08-29 首跑）：本 IT 在 Spring 上下文启动即暴露生产装配 bug——
  * Secrets / GlmClient / DashScopeTts / TtsPipeline 四个 bean 各有「生产构造器 +
@@ -89,9 +90,9 @@ class GoldenSmokeIT {
     private static final long POLL_BUDGET_MILLIS = 50 * 60_000L;
     private static final long MIN_VIDEO_BYTES = 1024L * 1024L;
 
-    /** 正向链 7 个阶段（QUEUED 入队历史之外，brief 要求全覆盖的阶段序列）。 */
+    /** 正向链 7 个阶段（QUEUED 入队历史之外，brief 要求全覆盖的阶段序列；Ruling-18：QA 前置于渲染）。 */
     private static final List<String> PIPELINE_STAGES = List.of(
-            "EXTRACTING", "GENERATING", "REVIEWING", "SPEAKING", "RENDERING", "QA", "DONE");
+            "EXTRACTING", "GENERATING", "REVIEWING", "SPEAKING", "QA", "RENDERING", "DONE");
     private static final Set<String> TERMINAL = Set.of("DONE", "FAILED", "CANCELLED");
 
     @LocalServerPort
@@ -197,13 +198,18 @@ class GoldenSmokeIT {
                 .as("stageHistory 覆盖全部 7 个阶段（生产只写 ENTER，EXIT 无写入点——报告披露）")
                 .containsExactlyInAnyOrderElementsOf(PIPELINE_STAGES);
         assertThat(enteredStages)
-                .as("阶段按正向链推进（QA→RENDERING 重渲回退允许重复，允许插入额外阶段）")
+                .as("阶段按正向链推进（Ruling-18：SPEAKING→QA→RENDERING→DONE，允许插入额外阶段）")
                 .containsSubsequence(PIPELINE_STAGES);
+        String qaNote = history.stream()
+                .filter(h -> "QA".equals(h.stage()))
+                .map(Hist::note)
+                .findFirst().orElse("");
+        assertThat(qaNote).as("QA 历史条目带审帧通过证据").contains("预审通过（");
         String doneNote = history.stream()
                 .filter(h -> "DONE".equals(h.stage()))
                 .map(Hist::note)
                 .findFirst().orElse("");
-        assertThat(doneNote).as("DONE 历史条目带 QA 审帧通过证据").contains("QA 通过（");
+        assertThat(doneNote).as("DONE 历史条目为渲染收尾（渲染后无 QA 轮）").contains("渲染完成");
 
         // 5. 成片流：GET /video 200 且 >1MB
         ResponseEntity<byte[]> video = rest.getForEntity("/api/v1/jobs/" + jobId + "/video", byte[].class);

@@ -12,18 +12,21 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class JobStatusTest {
 
-    /** 合法迁移对全集（spec §11 + 计划 Task 2 + T10 修复轮 M2 + Ruling-17）：全表 10×10 中仅这 23 对为 true。 */
+    /**
+     * 合法迁移对全集（spec §11 + 计划 Task 2 + T10 修复轮 M2 + Ruling-17 + Ruling-18）：
+     * 全表 10×10 中仅这 24 对为 true。
+     */
     private static final Set<List<JobStatus>> LEGAL = Set.of(
-            // 正向链 QUEUED→EXTRACTING→GENERATING→REVIEWING→SPEAKING→RENDERING→QA→DONE
+            // 正向链 QUEUED→EXTRACTING→GENERATING→REVIEWING→SPEAKING→QA→RENDERING→DONE
+            //（Ruling-18：QA 前置为 still 预审，渲染只走一次——渲染成功即 DONE，渲染后无 QA 轮）
             List.of(JobStatus.QUEUED, JobStatus.EXTRACTING),
             List.of(JobStatus.EXTRACTING, JobStatus.GENERATING),
             List.of(JobStatus.GENERATING, JobStatus.REVIEWING),
             List.of(JobStatus.REVIEWING, JobStatus.SPEAKING),
-            List.of(JobStatus.SPEAKING, JobStatus.RENDERING),
-            List.of(JobStatus.RENDERING, JobStatus.QA),
-            List.of(JobStatus.QA, JobStatus.DONE),
-            // 回退：QA 审帧链异常回退重渲染；REVIEWING 驳回 / Ruling-17 QA 判负 → 带清单回生成重做
+            List.of(JobStatus.SPEAKING, JobStatus.QA),
             List.of(JobStatus.QA, JobStatus.RENDERING),
+            List.of(JobStatus.RENDERING, JobStatus.DONE),
+            // 回退：REVIEWING 驳回 / Ruling-17 QA 判负 → 带清单回生成重做（QA→RENDERING 复用为预审通过的正向对）
             List.of(JobStatus.QA, JobStatus.GENERATING),
             List.of(JobStatus.REVIEWING, JobStatus.GENERATING),
             // 终态迁移：任意非终态 → FAILED
@@ -44,7 +47,7 @@ class JobStatusTest {
             List.of(JobStatus.QA, JobStatus.CANCELLED));
 
     @Test
-    @DisplayName("10×10 迁移全表：合法 23 对为 true，其余 77 对一律 false")
+    @DisplayName("10×10 迁移全表：合法 24 对为 true，其余 76 对一律 false")
     void canTransit_fullMatrix_onlyLegalPairsPass() {
         assertThat(JobStatus.values()).hasSize(10);
 
@@ -62,6 +65,30 @@ class JobStatusTest {
             }
         }
         assertThat(legalCount).as("合法迁移总数").isEqualTo(LEGAL.size());
+    }
+
+    @Test
+    @DisplayName("Ruling-18：QA→DONE 不再合法（渲染后无 QA 轮）；SPEAKING→QA 与 RENDERING→DONE 为新正向对")
+    void canTransit_ruling18_pairs() {
+        // 负例：QA 判负回 GENERATING / 预审过进 RENDERING，唯独不再直通 DONE
+        assertThat(JobStatus.canTransit(JobStatus.QA, JobStatus.DONE)).isFalse();
+        // 新增正向对
+        assertThat(JobStatus.canTransit(JobStatus.SPEAKING, JobStatus.QA)).isTrue();
+        assertThat(JobStatus.canTransit(JobStatus.RENDERING, JobStatus.DONE)).isTrue();
+        // 既有保留
+        assertThat(JobStatus.canTransit(JobStatus.QA, JobStatus.RENDERING)).isTrue();
+        assertThat(JobStatus.canTransit(JobStatus.QA, JobStatus.GENERATING)).isTrue();
+    }
+
+    @Test
+    @DisplayName("enterStage：QA→DONE 抛 IllegalStateException（状态机语义变更的显式负例）")
+    void enterStage_qaToDone_throws() {
+        Job job = jobAt(JobStatus.QA);
+        assertThatThrownBy(() -> job.enterStage(JobStatus.DONE, "渲染后直通 DONE（Ruling-18 后非法）"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("QA")
+                .hasMessageContaining("DONE");
+        assertThat(job.getStatus()).isEqualTo(JobStatus.QA);
     }
 
     @Test

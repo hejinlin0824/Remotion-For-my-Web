@@ -60,8 +60,9 @@ import static org.mockito.Mockito.when;
 
 /**
  * 编排器全链契约（全 mock，零真调，@Scheduled 直调 poll() 不起真调度）：
- * happy path 序列/调用顺序 / 驳回回传重试 / 驳回预算尽 / QA 判负回传重生成（Ruling-17）
- * 与 QA 预算边界（F2-R2）/ 审题判死 / 断点续跑 / 取消检查点 / 领单 CAS 抢占 / 取消 TOCTOU 兜底。
+ * happy path 序列（Ruling-18：SPEAKING→QA→RENDERING→DONE，渲染只走一次）/调用顺序 /
+ * 驳回回传重试 / 驳回预算尽 / QA 判负回传重生成（Ruling-17）与 QA 预算边界（F2-R2，T14a 恰 5 判）/
+ * 审题判死 / 断点续跑（含 QA 工作区与成片复用）/ 取消检查点 / 领单 CAS 抢占 / 取消 TOCTOU 兜底。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -138,15 +139,15 @@ class JobOrchestratorTest {
         return job;
     }
 
-    /** 沿正向链推进到目标阶段（测试起点），历史含 QUEUED→…→target 全部 ENTER。 */
+    /** 沿正向链（Ruling-18：SPEAKING→QA→RENDERING）推进到目标阶段（测试起点），历史含全部 ENTER。 */
     private Job claimedJobAt(JobStatus target) {
         Job job = queuedJob();
         for (JobStatus step : List.of(JobStatus.EXTRACTING, JobStatus.GENERATING, JobStatus.REVIEWING,
-                JobStatus.SPEAKING, JobStatus.RENDERING)) {
-            if (step.ordinal() > target.ordinal()) {
+                JobStatus.SPEAKING, JobStatus.QA, JobStatus.RENDERING)) {
+            job.enterStage(step, "测试推进");
+            if (step == target) {
                 break;
             }
-            job.enterStage(step, "测试推进");
         }
         return job;
     }
@@ -201,7 +202,7 @@ class JobOrchestratorTest {
     // ---- 1. happy path ----
 
     @Test
-    @DisplayName("happy path：QUEUED→…→DONE 全序列 + 协作者调用顺序 + DONE 清理与回调")
+    @DisplayName("happy path（Ruling-18）：QUEUED→…→SPEAKING→QA→RENDERING→DONE 全序列 + 协作者调用顺序 + DONE 清理与回调")
     void happyPath_fullSequence_inOrder() throws Exception {
         Job job = claimedJob();
         stubRepo(job);
@@ -212,7 +213,7 @@ class JobOrchestratorTest {
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
         assertThat(historyStages(job)).containsExactly(
                 "QUEUED", "EXTRACTING", "GENERATING", "REVIEWING", "SPEAKING",
-                "RENDERING", "QA", "DONE");
+                "QA", "RENDERING", "DONE");
         // artifactsDir 落库为绝对路径（GET /video 按 artifactsDir 直读 final.mp4）
         assertThat(job.getArtifactsDir())
                 .isEqualTo(artifactsFinal().getParent().toAbsolutePath().normalize().toString());
@@ -227,11 +228,14 @@ class JobOrchestratorTest {
         flow.verify(v3).validate(any());
         flow.verify(v4).validate(any());
         flow.verify(ttsPipeline).synthesizeAll(any(), any());
+        // QA 前置：审帧工作区由 QA 现建（渲染未发生），审帧通过后才渲染，渲染成功即 DONE（无第二轮 QA）
         flow.verify(workspaceManager).create(eq(JOB_ID), any(), any(), any());
-        flow.verify(renderWorker).render(wsPath());
         flow.verify(qaFrameCheck).check(wsPath());
+        flow.verify(renderWorker).render(wsPath());
         flow.verify(workspaceManager).cleanup(JOB_ID);
         flow.verify(callbackClient).notify(eq(CALLBACK_URL), any());
+        // 渲染复用 QA 预审建好的工作区：create 全链恰一次（不重建 → qa 产物不被洗掉）
+        verify(workspaceManager, times(1)).create(eq(JOB_ID), any(), any(), any());
 
         ArgumentCaptor<CallbackClient.CallbackPayload> payload = ArgumentCaptor.forClass(CallbackClient.CallbackPayload.class);
         verify(callbackClient).notify(eq(CALLBACK_URL), payload.capture());
@@ -276,7 +280,7 @@ class JobOrchestratorTest {
         assertThat(historyStages(job)).containsExactly(
                 "QUEUED", "EXTRACTING",
                 "GENERATING", "REVIEWING", "GENERATING", "REVIEWING", "GENERATING", "REVIEWING",
-                "SPEAKING", "RENDERING", "QA", "DONE");
+                "SPEAKING", "QA", "RENDERING", "DONE");
     }
 
     // ---- 3. 校验预算尽 → FAILED ----
@@ -301,7 +305,7 @@ class JobOrchestratorTest {
     // ---- 4. QA 判负 → 带 FAIL 清单回 GENERATING 重生成（Ruling-17 结构性主修） ----
 
     @Test
-    @DisplayName("Ruling-17：QA 判负 2 轮 → GENERATING 重生成且第 2/3 次生成参数携带 QA FAIL 清单 → 第 3 轮过 → DONE")
+    @DisplayName("Ruling-17/18：QA 判负 2 轮 → GENERATING 重生成且第 2/3 次生成参数携带 QA FAIL 清单 → 第 3 轮过 → 渲染一次 → DONE")
     void qaFails_twoRounds_regeneratesWithFailList_thenPass() throws Exception {
         Job job = claimedJob();
         stubRepo(job);
@@ -316,8 +320,9 @@ class JobOrchestratorTest {
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
         assertThat(job.getQaRounds()).isEqualTo(2);
         verify(qaFrameCheck, times(3)).check(any(Path.class));
-        verify(renderWorker, times(3)).render(any(Path.class));      // 每轮全片渲染（重生成后自然重做）
+        verify(renderWorker, times(1)).render(any(Path.class));      // Ruling-18：预审驳回循环零渲染，通过后只渲一次
         verify(ttsPipeline, times(3)).synthesizeAll(any(), any());   // 剧本变了 → TTS 重做，不得复用旧音频
+        verify(workspaceManager, times(3)).create(anyString(), any(), any(), any());   // 每轮预审按当轮剧本现建工作区
 
         // 第 2/3 次素材与剧本生成的错误清单 = 上轮 QA FAIL 清单（与 V 驳回同一错误注入通道）
         ArgumentCaptor<List<String>> materialErrors = ArgumentCaptor.forClass(List.class);
@@ -335,14 +340,14 @@ class JobOrchestratorTest {
 
         assertThat(historyStages(job)).containsExactly(
                 "QUEUED", "EXTRACTING",
-                "GENERATING", "REVIEWING", "SPEAKING", "RENDERING", "QA",
-                "GENERATING", "REVIEWING", "SPEAKING", "RENDERING", "QA",
-                "GENERATING", "REVIEWING", "SPEAKING", "RENDERING", "QA",
-                "DONE");
+                "GENERATING", "REVIEWING", "SPEAKING", "QA",
+                "GENERATING", "REVIEWING", "SPEAKING", "QA",
+                "GENERATING", "REVIEWING", "SPEAKING", "QA",
+                "RENDERING", "DONE");
     }
 
     @Test
-    @DisplayName("F2-R2 边界：QA 判负恰 maxRounds=5 轮 → FAILED——第 5 判负即终局，无第 6 次生成/渲染")
+    @DisplayName("F2-R2 边界（Ruling-18）：QA 判负恰 maxRounds=5 轮 → FAILED——第 5 判负即终局，全程零渲染")
     void qaFails_maxRoundsExhausted_failsAfterExactlyFiveJudgments() throws Exception {
         Job job = claimedJob();
         stubRepo(job);
@@ -354,10 +359,10 @@ class JobOrchestratorTest {
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
         assertThat(job.getQaRounds()).isEqualTo(props.getQa().getMaxRounds());
-        verify(qaFrameCheck, times(5)).check(any(Path.class));    // 恰 5 次 QA 判定（off-by-one 修复）
+        verify(qaFrameCheck, times(5)).check(any(Path.class));    // 恰 5 次 QA 判定（off-by-one 修复，T14a 语义保留）
         verify(materialStation, times(5)).generate(any(), anyList());
         verify(scriptStation, times(5)).assemble(any(), any(), anyList());
-        verify(renderWorker, times(5)).render(any(Path.class));   // 不出现第 6 渲
+        verify(renderWorker, never()).render(any(Path.class));    // Ruling-18：判负循环在渲染之前，一次渲染都不发生
         assertThat(job.getErrorMessage()).contains("QA 审帧 5 轮未过").contains("FAIL s03 结论卡多处不当折行");
         ArgumentCaptor<CallbackClient.CallbackPayload> payload = ArgumentCaptor.forClass(CallbackClient.CallbackPayload.class);
         verify(callbackClient).notify(eq(CALLBACK_URL), payload.capture());
@@ -384,18 +389,19 @@ class JobOrchestratorTest {
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
         ArgumentCaptor<ContentJson> rendered = ArgumentCaptor.forClass(ContentJson.class);
         verify(workspaceManager, times(2)).create(eq(JOB_ID), rendered.capture(), any(), any());
-        assertThat(rendered.getAllValues().get(0)).isEqualTo(v1);   // 首轮渲染旧剧本
-        assertThat(rendered.getAllValues().get(1)).isEqualTo(v2);   // 驳回后渲染重生成的新剧本
+        assertThat(rendered.getAllValues().get(0)).isEqualTo(v1);   // 首轮预审工作区写入旧剧本
+        assertThat(rendered.getAllValues().get(1)).isEqualTo(v2);   // 驳回后预审与渲染用的都是重生成的新剧本
         ArgumentCaptor<ContentJson> spoken = ArgumentCaptor.forClass(ContentJson.class);
         verify(ttsPipeline, times(2)).synthesizeAll(spoken.capture(), any());
         assertThat(spoken.getAllValues().get(1)).isEqualTo(v2);     // TTS 朗读的也是新剧本
+        verify(renderWorker, times(1)).render(any(Path.class));     // 只有通过的版本才付渲染成本
     }
 
-    // ---- 4b. T12 F4 回归：审帧链异常回退重渲，QA→RENDERING→QA 两条 ENTER 均落 history ----
+    // ---- 4b. T12 F4 回归（Ruling-18 改版）：审帧链异常就地重审，绝不回退重渲让未审成片直达 DONE ----
 
     @Test
-    @DisplayName("F4 回归：QA 审帧链 retryable 异常（EPERM 形态）→ 回退重渲，QA→RENDERING→QA 两条 ENTER 均在 stageHistory")
-    void qaChainException_rerender_historyRecordsBothEnters() throws Exception {
+    @DisplayName("F4 回归（Ruling-18）：QA 审帧链 retryable 异常（EPERM 形态）→ 就地重审（无状态迁移），通过后只渲一次 → DONE")
+    void qaChainException_inPlaceReaudit_thenRendersOnce() throws Exception {
         Job job = claimedJob();
         stubRepo(job);
         stubStationsOk();
@@ -407,15 +413,14 @@ class JobOrchestratorTest {
         orchestrator.process(JOB_ID);
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
-        verify(renderWorker, times(2)).render(any(Path.class));   // 回退后全片重渲一次
+        verify(renderWorker, times(1)).render(any(Path.class));   // 异常发生在渲染之前，重审不重渲
+        verify(workspaceManager, times(1)).create(anyString(), any(), any(), any());   // 重审复用同一工作区
         assertThat(job.getQaRounds()).isEqualTo(1);
-        // 关键不变量：每次 canTransit 成功都恰落一条 ENTER——两条迁移均不得缺席
+        assertThat(job.getLastError()).contains("审帧截图失败");
+        // 就地重审不发生状态迁移（canTransit(QA,QA)=false），历史只记一次 QA ENTER——痕迹是 qaRounds/lastError
         assertThat(historyStages(job)).containsExactly(
                 "QUEUED", "EXTRACTING", "GENERATING", "REVIEWING", "SPEAKING",
-                "RENDERING", "QA", "RENDERING", "QA", "DONE");
-        assertThat(job.getStageHistory())
-                .extracting(StageHistoryEntry::getNote)
-                .anySatisfy(note -> assertThat(note).contains("审帧链异常"));
+                "QA", "RENDERING", "DONE");
     }
 
     // ---- 5. 审题判死 → 直接 FAILED ----
@@ -441,7 +446,7 @@ class JobOrchestratorTest {
     // ---- 6. 断点续跑 ----
 
     @Test
-    @DisplayName("断点续跑：content.json+audio_meta.json 已在盘 → 审题/生成/TTS 零调用，直接渲染")
+    @DisplayName("断点续跑：content.json+audio_meta.json 已在盘 → 审题/生成/TTS 零调用，QA 复用盘上工作区（qa 产物随之保留）后渲染")
     void resume_fromWorkspaceArtifacts() throws Exception {
         Job job = claimedJob();
         stubRepo(job);
@@ -450,7 +455,7 @@ class JobOrchestratorTest {
         when(v2.validate(any())).thenReturn(ValidationResult.ok());
         when(v3.validate(any())).thenReturn(ValidationResult.ok());
         when(v4.validate(any())).thenReturn(ValidationResult.ok());
-        when(workspaceManager.create(eq(JOB_ID), any(), any(), any())).thenReturn(wsPath());
+        when(workspaceManager.workspacePath(JOB_ID)).thenReturn(wsPath());   // QA 复用盘上工作区的定位入口
         when(renderWorker.render(any(Path.class))).thenReturn(artifactsFinal());
         when(qaFrameCheck.check(any(Path.class))).thenReturn(new QaFrameCheck.QaResult(true, List.of(), 3));
 
@@ -465,12 +470,32 @@ class JobOrchestratorTest {
         assertThat(job.getStageHistory())
                 .extracting(StageHistoryEntry::getNote)
                 .anySatisfy(note -> assertThat(note).contains("断点续跑").contains("V2"));
-        // wav 字节从盘上读回并交给 WorkspaceManager
-        @SuppressWarnings("unchecked")
-        ArgumentCaptor<Map<Integer, byte[]>> wavs = ArgumentCaptor.forClass(Map.class);
-        verify(workspaceManager).create(eq(JOB_ID), any(), any(), wavs.capture());
-        assertThat(wavs.getValue()).containsEntry(1, WAV_BYTES);
+        // QA 前置（Ruling-18）：盘上工作区即本轮 content/audio 的出处 → 原地复用（qa 产物不被重建洗掉），
+        // 渲染复用同一工作区——create 全程零调用
+        verify(workspaceManager, never()).create(anyString(), any(), any(), any());
+        verify(qaFrameCheck).check(wsPath());
         verify(renderWorker).render(wsPath());
+    }
+
+    @Test
+    @DisplayName("Ruling-18 续跑：RENDERING 中断重启且 final.mp4 已在盘 → 跳过渲染与 QA 直接 DONE 归档（渲染后无 QA 轮）")
+    void resume_renderedFinalOnDisk_finishesDoneWithoutRerenderOrQa() throws Exception {
+        Job job = claimedJobAt(JobStatus.RENDERING);
+        stubRepo(job);
+        presetResumeArtifacts();   // 断点产物供 loadResume 恢复 content/audio
+        Files.createDirectories(artifactsFinal().getParent());
+        Files.write(artifactsFinal(), new byte[]{1, 2, 3});   // 渲染已完成但 DONE 未落库的窗口期中断
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        verify(renderWorker, never()).render(any(Path.class));
+        verify(qaFrameCheck, never()).check(any(Path.class));   // 不再重审——渲染后无 QA 轮
+        verify(workspaceManager, never()).create(anyString(), any(), any(), any());
+        assertThat(job.getArtifactsDir())
+                .isEqualTo(artifactsFinal().getParent().toAbsolutePath().normalize().toString());
+        verify(workspaceManager).cleanup(JOB_ID);
+        verify(callbackClient).notify(eq(CALLBACK_URL), any());
     }
 
     // ---- 7. 取消 ----
@@ -594,7 +619,7 @@ class JobOrchestratorTest {
     // ---- 11. 修复轮 I2：不可重试渲染异常直接 FAILED ----
 
     @Test
-    @DisplayName("I2：RenderException(!retryable) → 直接 FAILED，不进重试/回退循环")
+    @DisplayName("I2：RenderException(!retryable) → 直接 FAILED，不进重试循环（预审已在渲染前通过）")
     void renderNonRetryableFailure_failsImmediately() throws Exception {
         Job job = claimedJob();
         stubRepo(job);
@@ -607,7 +632,7 @@ class JobOrchestratorTest {
         assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
         assertThat(job.getErrorMessage()).contains("不可重试").contains("composition 不存在");
         verify(renderWorker, times(1)).render(any(Path.class));
-        verify(qaFrameCheck, never()).check(any(Path.class));
+        verify(qaFrameCheck, times(1)).check(any(Path.class));   // Ruling-18：预审先于渲染完成
         assertThat(job.getQaRounds()).isZero();
     }
 
@@ -631,7 +656,7 @@ class JobOrchestratorTest {
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.CANCELLED);
         assertThat(historyStages(job)).containsExactly(
-                "QUEUED", "EXTRACTING", "GENERATING", "REVIEWING", "SPEAKING", "RENDERING", "CANCELLED");
+                "QUEUED", "EXTRACTING", "GENERATING", "REVIEWING", "SPEAKING", "QA", "RENDERING", "CANCELLED");
         verify(renderWorker, times(1)).render(any(Path.class));   // 渲染中不打断，完成后检查点
         verifyNoInteractions(qaFrameCheck);
         assertThat(artifactsFinal()).doesNotExist();   // 成片丢弃（不入 artifacts）
@@ -642,17 +667,15 @@ class JobOrchestratorTest {
         assertThat(payload.getValue().videoUrl()).isNull();
     }
 
-    // ---- 13. 修复轮 M2：QA 完成后取消（成片丢弃，不 DONE） ----
+    // ---- 13. 修复轮 M2（Ruling-18 语义）：QA 预审完成后取消（不 DONE、渲染不再发生） ----
 
     @Test
-    @DisplayName("M2：QA 期间置 cancelRequested → QA 完成后停下 CANCELLED（即使审帧通过），成片丢弃")
+    @DisplayName("M2：QA 预审期间置 cancelRequested → 预审完成后停下 CANCELLED（即使审帧通过），渲染不再发生")
     void cancel_duringQa_discardsArtifacts() throws Exception {
-        Job job = claimedJobAt(JobStatus.RENDERING);
+        Job job = claimedJobAt(JobStatus.QA);
         stubRepo(job);
-        presetResumeArtifacts();
-        Files.createDirectories(artifactsFinal().getParent());
-        Files.write(artifactsFinal(), new byte[]{1, 2, 3});   // 上一轮渲染已产成片（RENDERING 将被跳过）
-        when(workspaceManager.workspacePath(JOB_ID)).thenReturn(wsPath());   // QA 的工作区路径（RENDERING 被跳过、ctx.workspace 未建）
+        presetResumeArtifacts();   // QA 断点续跑：盘上工作区被原地复用
+        when(workspaceManager.workspacePath(JOB_ID)).thenReturn(wsPath());
         when(qaFrameCheck.check(any(Path.class))).thenAnswer(inv -> {
             job.setCancelRequested(true);
             return new QaFrameCheck.QaResult(true, List.of(), 3);
@@ -661,9 +684,9 @@ class JobOrchestratorTest {
         orchestrator.process(JOB_ID);
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.CANCELLED);
-        verify(renderWorker, never()).render(any(Path.class));   // final.mp4 已在盘 → 渲染跳过
+        verify(renderWorker, never()).render(any(Path.class));   // 预审先于渲染：取消后渲染成本一次都不付
         verify(qaFrameCheck, times(1)).check(any(Path.class));
-        assertThat(artifactsFinal()).doesNotExist();   // QA 完成后取消 → 成片丢弃，不 DONE
+        assertThat(artifactsFinal()).doesNotExist();   // 预审阶段无成片可丢（渲染未发生），不入 artifacts
         verify(workspaceManager).cleanup(JOB_ID);
         ArgumentCaptor<CallbackClient.CallbackPayload> payload = ArgumentCaptor.forClass(CallbackClient.CallbackPayload.class);
         verify(callbackClient).notify(eq(CALLBACK_URL), payload.capture());
