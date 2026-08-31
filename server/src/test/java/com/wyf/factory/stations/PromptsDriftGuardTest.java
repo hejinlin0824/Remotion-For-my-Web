@@ -75,7 +75,7 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("COORDINATOR 与 golden 同步：条数计划/锚点指派/全部场景 id 逐字注入")
+    @DisplayName("COORDINATOR 与 golden 同步：条数计划/锚点指派/全部场景 id 逐字注入（T18.1 有意重录：+stepRef 计划级分派）")
     void coordinatorPromptStaysInSyncWithGolden() throws Exception {
         JsonNode golden = MAPPER.readTree(goldenFile.toFile());
         assertThat(Prompts.COORDINATOR)
@@ -87,6 +87,22 @@ class PromptsDriftGuardTest {
                     .as("协调者 few-shot 应含 golden 场景 %s", scene.path("id").asText())
                     .contains(scene.path("id").asText());
         }
+        // T18.1 重录：golden few-shot 的 scenes 数组携带计划级 stepRef（s05:1 s06 popup:1
+        // s07:2 s08:3 s09 popup:3 s10:4 s11:5；非 step 场景不加字段），并硬化 stepRef 规则段
+        assertThat(Prompts.COORDINATOR)
+                .as("step-card/derivation-popup 必须带 stepRef 的规则段")
+                .contains("step-card 与 derivation-popup 必须带 stepRef")
+                .as("golden step-card 逐字带 stepRef")
+                .contains("\"id\":\"s05\",\"act\":3,\"component\":\"step-card\",\"stepRef\":1")
+                .contains("\"id\":\"s07\",\"act\":3,\"component\":\"step-card\",\"stepRef\":2")
+                .contains("\"id\":\"s08\",\"act\":3,\"component\":\"step-card\",\"stepRef\":3")
+                .contains("\"id\":\"s10\",\"act\":3,\"component\":\"step-card\",\"stepRef\":4")
+                .contains("\"id\":\"s11\",\"act\":3,\"component\":\"step-card\",\"stepRef\":5")
+                .as("golden popup 逐字带同 stepRef 且紧跟")
+                .contains("\"id\":\"s06\",\"act\":3,\"component\":\"derivation-popup\",\"stepRef\":1")
+                .contains("\"id\":\"s09\",\"act\":3,\"component\":\"derivation-popup\",\"stepRef\":3")
+                .as("非 step 场景不带 stepRef（problem-card 形态无该字段）")
+                .contains("{\"id\":\"s01\",\"act\":2,\"component\":\"problem-card\"}");
     }
 
     @Test

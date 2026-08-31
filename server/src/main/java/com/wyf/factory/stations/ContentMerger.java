@@ -17,6 +17,10 @@ import java.util.List;
  * {@link StationChecks}）：meta/problem/四段条数与字段/scenes 全查——分片级校验已保证
  * 合法，此处是防御网，理论不可达；可达即内部不一致 → 抛
  * {@link ShardGenException}("MERGE") 交编排器既有预算通道。</p>
+ *
+ * <p>同层防御网（T18.1）：合并后 scenes 序列与 skeleton.scenes() 逐场核对
+ * （id/act/component/stepRef 全等、顺序一致、条数一致）——上游已把 stepRef 钉死，
+ * 输出≠计划只可能是内部不一致；核对失败同走 MERGE 差异清单通道。</p>
  */
 @Component
 public class ContentMerger {
@@ -42,10 +46,54 @@ public class ContentMerger {
                 material.knowledge(), material.steps(), material.pitfalls(), material.generalMethod(),
                 List.copyOf(scenes));
         List<String> problems = validate(content);
+        checkAgainstPlan(scenes, skeleton, problems);
         if (!problems.isEmpty()) {
             throw new ShardGenException(MERGE_SHARD, problems, null);
         }
         return content;
+    }
+
+    /**
+     * 输出=计划核对（T18.1 防御网，理论不可达）：合并后 scenes 与 skeleton.scenes()
+     * 逐场核对 id/act/component/stepRef 全等、顺序一致、条数一致；违反记差异走既有
+     * MERGE 通道。id 错位时跳过该场其余字段比较（逐字段只会级联误报）。
+     */
+    private static void checkAgainstPlan(List<ContentJson.Scene> scenes, Skeleton skeleton,
+                                         List<String> problems) {
+        List<Skeleton.ScenePlan> plan = skeleton.scenes() == null ? List.of() : skeleton.scenes();
+        if (scenes.size() != plan.size()) {
+            problems.add("合并 scenes 条数 " + scenes.size() + " 与骨架计划 " + plan.size()
+                    + " 不一致（输出必须等于计划）");
+            return;
+        }
+        for (int i = 0; i < plan.size(); i++) {
+            Skeleton.ScenePlan expected = plan.get(i);
+            ContentJson.Scene actual = scenes.get(i);
+            if (!expected.id().equals(actual.id())) {
+                problems.add("合并 scenes[" + i + "] id 与骨架计划不一致：输出='" + actual.id()
+                        + "' 计划='" + expected.id() + "'");
+                continue;
+            }
+            if (actual.act() != expected.act()) {
+                problems.add("合并 scenes[" + i + "](" + expected.id() + ") act 与骨架计划不一致：输出="
+                        + actual.act() + " 计划=" + expected.act());
+            }
+            if (!expected.component().equals(actual.component())) {
+                problems.add("合并 scenes[" + i + "](" + expected.id() + ") component 与骨架计划不一致：输出='"
+                        + actual.component() + "' 计划='" + expected.component() + "'");
+            }
+            Object outRef = actual.props() == null ? null : actual.props().get("stepRef");
+            Integer planRef = expected.stepRef();
+            if (planRef == null) {
+                if (outRef != null) {
+                    problems.add("合并 scenes[" + i + "](" + expected.id() + ") 计划无 stepRef，输出 props.stepRef="
+                            + outRef + " 多余（输出必须等于计划）");
+                }
+            } else if (!(outRef instanceof Number number) || number.intValue() != planRef) {
+                problems.add("合并 scenes[" + i + "](" + expected.id() + ") props.stepRef=" + outRef
+                        + " 与骨架计划 stepRef=" + planRef + " 不一致（输出必须等于计划）");
+            }
+        }
     }
 
     /** 既有工位级轻校验照跑：规则与原 ScriptStation.parse 完全一致（shapes + 条数 + 字段）。 */

@@ -34,7 +34,7 @@ public final class Prompts {
             你是考研数学讲题视频的生成协调者（总规划师）。用户给你题目 JSON（{"problemType":...,"lines":[{id,segments:[{type,value}]}]}，type="math" 的 value 是 LaTeX 源码）。你不写正文内容，只产出一份骨架 JSON，供后续分片工位（题干排版/素材正文/场景分镜）照着填内容。只输出 JSON 本身，不要 markdown 代码块，不要解释。
 
             输出形状：
-            {"problemType":...,"counts":{"knowledge":K,"steps":S,"pitfalls":P,"generalMethod":M},"anchors":["L1",...],"scenes":[{"id":"s01","act":2,"component":"problem-card"},...],"glossary":[{"term":"术语","standard":"统一叫法"},...]}
+            {"problemType":...,"counts":{"knowledge":K,"steps":S,"pitfalls":P,"generalMethod":M},"anchors":["L1",...],"scenes":[{"id":"s01","act":2,"component":"problem-card"},{"id":"s05","act":3,"component":"step-card","stepRef":1},...],"glossary":[{"term":"术语","standard":"统一叫法"},...]}
 
             规则（必须全部满足）：
             - problemType 照抄输入题目的 problemType
@@ -46,11 +46,12 @@ public final class Prompts {
             - component 白名单按幕：act2 只允许 problem-card、knowledge-card；act3 只允许 step-card、derivation-popup、pitfall-card、checklist-card；act4 只允许 general-list（共 7 个组件，不得越幕）
             - scenes[0] 必须是 act2 的 problem-card；act2 至少一场 knowledge-card；act3 至少一场；act4 至少一场
             - act3 每个 step 一张 step-card（按 stepRef=1..steps 条数顺序）；需要重点展示推导的步骤配 derivation-popup 紧跟其后；通常以一张 checklist-card 收尾
+            - step-card 与 derivation-popup 必须带 stepRef：step-card 的 stepRef 按 1..steps 顺序各出现一次（第 i 步的卡 stepRef=i）；derivation-popup 的 stepRef = 其紧跟的 step-card 的 stepRef，且必须紧跟其后；其余组件不得带 stepRef
             - act4 每个 generalMethod 条目一张 general-list
             - glossary：3-8 条全片关键术语的统一叫法（如「判别式」「单调递增」「恒成立」），后续分片凡提到这些术语必须照表用词
 
             示例（golden 题：f(x)=x^{3}+ax^{2}+x 在 R 上单调递增求 a）：
-            {"problemType":"计算题","counts":{"knowledge":3,"steps":5,"pitfalls":2,"generalMethod":3},"anchors":["L1","L2","L2","L3","L3"],"scenes":[{"id":"s01","act":2,"component":"problem-card"},{"id":"s02","act":2,"component":"knowledge-card"},{"id":"s03","act":2,"component":"knowledge-card"},{"id":"s04","act":2,"component":"knowledge-card"},{"id":"s05","act":3,"component":"step-card"},{"id":"s06","act":3,"component":"derivation-popup"},{"id":"s07","act":3,"component":"step-card"},{"id":"s08","act":3,"component":"step-card"},{"id":"s09","act":3,"component":"derivation-popup"},{"id":"s10","act":3,"component":"step-card"},{"id":"s11","act":3,"component":"step-card"},{"id":"s12","act":3,"component":"pitfall-card"},{"id":"s13","act":3,"component":"pitfall-card"},{"id":"s14","act":3,"component":"checklist-card"},{"id":"s15","act":4,"component":"general-list"},{"id":"s16","act":4,"component":"general-list"},{"id":"s17","act":4,"component":"general-list"}],"glossary":[{"term":"判别式","standard":"判别式（记号 Δ）"},{"term":"单调递增","standard":"单调递增"},{"term":"恒成立","standard":"恒成立"}]}""";
+            {"problemType":"计算题","counts":{"knowledge":3,"steps":5,"pitfalls":2,"generalMethod":3},"anchors":["L1","L2","L2","L3","L3"],"scenes":[{"id":"s01","act":2,"component":"problem-card"},{"id":"s02","act":2,"component":"knowledge-card"},{"id":"s03","act":2,"component":"knowledge-card"},{"id":"s04","act":2,"component":"knowledge-card"},{"id":"s05","act":3,"component":"step-card","stepRef":1},{"id":"s06","act":3,"component":"derivation-popup","stepRef":1},{"id":"s07","act":3,"component":"step-card","stepRef":2},{"id":"s08","act":3,"component":"step-card","stepRef":3},{"id":"s09","act":3,"component":"derivation-popup","stepRef":3},{"id":"s10","act":3,"component":"step-card","stepRef":4},{"id":"s11","act":3,"component":"step-card","stepRef":5},{"id":"s12","act":3,"component":"pitfall-card"},{"id":"s13","act":3,"component":"pitfall-card"},{"id":"s14","act":3,"component":"checklist-card"},{"id":"s15","act":4,"component":"general-list"},{"id":"s16","act":4,"component":"general-list"},{"id":"s17","act":4,"component":"general-list"}],"glossary":[{"term":"判别式","standard":"判别式（记号 Δ）"},{"term":"单调递增","standard":"单调递增"},{"term":"恒成立","standard":"恒成立"}]}""";
 
     /**
      * GEN-P1 题干片工位：题干 JSON → content.json 的 problem 段（{"lines":[...]}）。
@@ -210,13 +211,14 @@ public final class Prompts {
      * 并列条件拆分、逐步自验三条生成规则；few-shot = golden scenes 切片 s10..s14 逐字。）
      */
     public static final String SCENE = """
-            你是考研数学讲题视频的场景分镜师。用户给你：题目 JSON（problem，type="math" 的 value 是 LaTeX 源码）、素材 JSON（material，四段）、本片场景清单 plan（{"id","act","component"} 数组，协调者已按全题统一规划）、术语表 glossary。只输出本片的 scenes 切片。只输出 JSON 本身，不要 markdown 代码块，不要解释。
+            你是考研数学讲题视频的场景分镜师。用户给你：题目 JSON（problem，type="math" 的 value 是 LaTeX 源码）、素材 JSON（material，四段）、本片场景清单 plan（{"id","act","component","stepRef"?} 数组，协调者已按全题统一规划，stepRef 仅 step-card/derivation-popup 携带）、术语表 glossary。只输出本片的 scenes 切片。只输出 JSON 本身，不要 markdown 代码块，不要解释。
 
             输出形状：
             {"scenes":[{...},...]}
 
             骨架绑定（必须全部满足，不得自行改计划）：
             - 只输出 plan 列出的场景：每场 id/act/component 与 plan 逐场一致、顺序一致，不得增删场景、不得改 id
+            - step-card/derivation-popup 的 props.stepRef 必须照抄 plan 的 stepRef（第 i 步的卡 stepRef=i，popup 与其紧跟的 step-card 同值），不得自选步骤；其余组件不得带 props.stepRef
             - 每场 {"id":"...","act":2|3|4,"component":"...","ttsText":"...","props":{...}}
             - ref 编号以输入 material 的条数为界，不得越界
             - 术语照 glossary 统一叫法，不得同物异名
@@ -237,7 +239,7 @@ public final class Prompts {
             - ttsText：口语化讲稿，像老师在讲课，每个镜头 2-4 句话；不要朗读题干（题干在画面上），讲思路和动作
 
             示例（golden 题，本片 plan=s10..s14；输入 problem 与题干片示例同源、material 与素材片示例同源，此处从略）：
-            user: {"problemType":"计算题","problem":{"lines":[...]},"material":{"knowledge":[...],"steps":[...],"pitfalls":[...],"generalMethod":[...]},"plan":[{"id":"s10","act":3,"component":"step-card"},{"id":"s11","act":3,"component":"step-card"},{"id":"s12","act":3,"component":"pitfall-card"},{"id":"s13","act":3,"component":"pitfall-card"},{"id":"s14","act":3,"component":"checklist-card"}],"glossary":[{"term":"判别式","standard":"判别式（记号 Δ）"},{"term":"单调递增","standard":"单调递增"},{"term":"恒成立","standard":"恒成立"}]}
+            user: {"problemType":"计算题","problem":{"lines":[...]},"material":{"knowledge":[...],"steps":[...],"pitfalls":[...],"generalMethod":[...]},"plan":[{"id":"s10","act":3,"component":"step-card","stepRef":4},{"id":"s11","act":3,"component":"step-card","stepRef":5},{"id":"s12","act":3,"component":"pitfall-card"},{"id":"s13","act":3,"component":"pitfall-card"},{"id":"s14","act":3,"component":"checklist-card"}],"glossary":[{"term":"判别式","standard":"判别式（记号 Δ）"},{"term":"单调递增","standard":"单调递增"},{"term":"恒成立","standard":"恒成立"}]}
             assistant: {"scenes": [
                 { "id": "s10", "act": 3, "component": "step-card", "ttsText": "第四步，解这个不等式。4a 方小于等于 12，a 方小于等于 3，开方得到负根号 3 小于等于 a 小于等于根号 3。", "props": { "stepRef": 4 } },
                 { "id": "s11", "act": 3, "component": "step-card", "ttsText": "最后下结论：a 属于闭区间，负根号 3 到根号 3。两个端点都取得到，千万别写成开的。", "props": { "stepRef": 5 } },

@@ -22,8 +22,10 @@ import java.util.List;
  * 口播与画面公式近距离对齐（上下文专注收益）。</p>
  *
  * <p>骨架绑定校验：scenes 与 plan 逐场一致（id/顺序/act/component 不得增删改）、
- * 每场必备 ttsText（非空）/props、derivation-popup 的 props.formula 非空 →
- * 违反抛 retryable {@link GlmException}，清单即回传重试清单。</p>
+ * 每场必备 ttsText（非空）/props、derivation-popup 的 props.formula 非空、
+ * 计划钉死（T18.1）——step-card/derivation-popup 的 props.stepRef 必须照抄 plan 该场的
+ * stepRef（缺/不等各记一条，消息含双值），其余组件输出 props.stepRef 也记差异
+ * （钉死=逐字段一致，不许多也不许少）→ 违反抛 retryable {@link GlmException}，清单即回传重试清单。</p>
  */
 @Component
 public class SceneShardStation {
@@ -87,7 +89,7 @@ public class SceneShardStation {
         }
     }
 
-    /** 骨架绑定校验：与 plan 逐场一致（id/顺序/act/component）+ 每场必备字段 + popup formula 非空。 */
+    /** 骨架绑定校验：与 plan 逐场一致（id/顺序/act/component）+ 每场必备字段 + popup formula 非空 + stepRef 钉死。 */
     private static void checkPlanBinding(JsonNode scenes, List<Skeleton.ScenePlan> plan, List<String> problems) {
         if (!scenes.isArray() || scenes.isEmpty()) {
             problems.add("场景片 scenes 缺失或不是非空数组");
@@ -120,6 +122,7 @@ public class SceneShardStation {
                 problems.add("场景片 " + tag + " component 与骨架计划不一致：输出='" + component.asText("")
                         + "' 计划='" + expected.component() + "'");
             }
+            checkStepRefPinning(tag, expected, scene, problems);
             JsonNode ttsText = scene.path("ttsText");
             if (!ttsText.isTextual() || ttsText.asText().isBlank()) {
                 problems.add("场景片 " + tag + " 缺必需字段 ttsText");
@@ -133,6 +136,34 @@ public class SceneShardStation {
                     problems.add("场景片 " + tag + " derivation-popup 缺 props.formula（必须照抄该步 derivation）");
                 }
             }
+        }
+    }
+
+    /**
+     * 计划钉死（T18.1）：props.stepRef 与 plan 该场的 stepRef 逐字段一致。
+     * step-card/derivation-popup：缺/不等各记一条（消息含双值，「哪张卡讲第几步」由
+     * 协调者单源指派，场景片照抄不得自选）；其余组件：输出 props.stepRef 存在也记差异。
+     * props 非对象时跳过（「缺必需字段 props」已记，不级联）。
+     */
+    private static void checkStepRefPinning(String tag, Skeleton.ScenePlan expected,
+                                            JsonNode scene, List<String> problems) {
+        JsonNode props = scene.path("props");
+        if (!props.isObject()) {
+            return;
+        }
+        JsonNode outRef = props.path("stepRef");
+        boolean stepBearing = "step-card".equals(expected.component()) || "derivation-popup".equals(expected.component());
+        if (stepBearing) {
+            if (!outRef.isInt()) {
+                problems.add("场景片 " + tag + " " + expected.component() + " 缺 props.stepRef（计划 stepRef="
+                        + expected.stepRef() + "，必须照抄）");
+            } else if (outRef.asInt() != expected.stepRef()) {
+                problems.add("场景片 " + tag + " props.stepRef=" + outRef.asInt() + " 与骨架计划 stepRef="
+                        + expected.stepRef() + " 不一致（必须照抄 plan，不得自选步骤）");
+            }
+        } else if (!outRef.isMissingNode()) {
+            problems.add("场景片 " + tag + " " + expected.component() + " 计划无 stepRef，输出不得携带 props.stepRef"
+                    + "（钉死=逐字段一致）");
         }
     }
 }

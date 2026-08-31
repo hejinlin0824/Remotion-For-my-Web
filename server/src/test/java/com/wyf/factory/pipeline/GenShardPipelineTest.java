@@ -57,15 +57,17 @@ class GenShardPipelineTest {
 
     private static final ExtractResult EXTRACT = MaterialShardStationTest.EXTRACT;
 
-    /** 小骨架：act2 两场 + act3 两场 + act4 一场 → 场景片 3 片。 */
+    /** 小骨架：act2 两场 + act3 三场（step-card 分派 1..3）+ act4 一场 → 场景片 3 片。
+     *  （T18.1 计划不变量自洽：counts.steps=3 与 3 张 step-card 恰好覆盖。） */
     private static final Skeleton SMALL = new Skeleton("计算题",
             new Skeleton.Counts(2, 3, 1, 3),
             List.of("L1", "L2", "L3"),
-            List.of(new Skeleton.ScenePlan("s01", 2, "problem-card"),
-                    new Skeleton.ScenePlan("s02", 2, "knowledge-card"),
-                    new Skeleton.ScenePlan("s03", 3, "step-card"),
-                    new Skeleton.ScenePlan("s04", 3, "step-card"),
-                    new Skeleton.ScenePlan("s05", 4, "general-list")),
+            List.of(new Skeleton.ScenePlan("s01", 2, "problem-card", null),
+                    new Skeleton.ScenePlan("s02", 2, "knowledge-card", null),
+                    new Skeleton.ScenePlan("s03", 3, "step-card", 1),
+                    new Skeleton.ScenePlan("s04", 3, "step-card", 2),
+                    new Skeleton.ScenePlan("s05", 3, "step-card", 3),
+                    new Skeleton.ScenePlan("s06", 4, "general-list", null)),
             List.of(new Skeleton.GlossaryTerm("判别式", "判别式（记号 Δ）")));
 
     /** golden 同构骨架：17 场（act2 4 / act3 10 / act4 3）→ 场景片 4 片（act3 拆两片均分）。 */
@@ -84,13 +86,29 @@ class GenShardPipelineTest {
         for (int i = 1; i <= 17; i++) {
             String id = String.format("s%02d", i);
             if (i == 1) {
-                scenes.add(new Skeleton.ScenePlan(id, 2, "problem-card"));
+                scenes.add(new Skeleton.ScenePlan(id, 2, "problem-card", null));
             } else if (i <= 4) {
-                scenes.add(new Skeleton.ScenePlan(id, 2, "knowledge-card"));
+                scenes.add(new Skeleton.ScenePlan(id, 2, "knowledge-card", null));
             } else if (i <= 14) {
-                scenes.add(new Skeleton.ScenePlan(id, 3, i == 6 || i == 9 ? "derivation-popup" : "step-card"));
+                // golden 同构（T18.1 计划级 stepRef 分派）：s05:1 s06 popup:1 s07:2 s08:3
+                // s09 popup:3 s10:4 s11:5；s12/s13 pitfall、s14 checklist 不带 stepRef
+                String component = switch (i) {
+                    case 6, 9 -> "derivation-popup";
+                    case 12, 13 -> "pitfall-card";
+                    case 14 -> "checklist-card";
+                    default -> "step-card";
+                };
+                Integer stepRef = switch (i) {
+                    case 5, 6 -> 1;
+                    case 7 -> 2;
+                    case 8, 9 -> 3;
+                    case 10 -> 4;
+                    case 11 -> 5;
+                    default -> null;
+                };
+                scenes.add(new Skeleton.ScenePlan(id, 3, component, stepRef));
             } else {
-                scenes.add(new Skeleton.ScenePlan(id, 4, "general-list"));
+                scenes.add(new Skeleton.ScenePlan(id, 4, "general-list", null));
             }
         }
         return new Skeleton("计算题", new Skeleton.Counts(3, 5, 2, 3),
@@ -117,15 +135,15 @@ class GenShardPipelineTest {
                 new ContentJson.Line("L3", List.of(new ContentJson.Seg("text", "求实数 "))));
     }
 
-    /** plan → 合法 scenes 切片（props 按组件给最小合法值）。 */
+    /** plan → 合法 scenes 切片（props 按组件给最小合法值；stepRef 钉死照抄计划，T18.1）。 */
     private static List<ContentJson.Scene> scenesFor(List<Skeleton.ScenePlan> plan) {
         List<ContentJson.Scene> scenes = new ArrayList<>();
         for (Skeleton.ScenePlan p : plan) {
             Map<String, Object> props = switch (p.component()) {
                 case "problem-card" -> Map.of();
                 case "knowledge-card" -> Map.of("knowledgeRef", 1);
-                case "step-card" -> Map.of("stepRef", 1);
-                case "derivation-popup" -> Map.of("stepRef", 1, "formula", "f'(x)=3x^{2}+2ax+1");
+                case "step-card" -> Map.of("stepRef", p.stepRef());
+                case "derivation-popup" -> Map.of("stepRef", p.stepRef(), "formula", "f'(x)=3x^{2}+2ax+1");
                 case "pitfall-card" -> Map.of("pitfallRef", 1);
                 case "checklist-card" -> Map.of("pitfallRefs", List.of(1));
                 default -> Map.of("itemRef", 1);
@@ -181,7 +199,7 @@ class GenShardPipelineTest {
         assertThat(route("V1/ttsText: s04 ttsText 为空").summary()).isEqualTo("P3:act3-a");
         assertThat(route("FAIL s03 帧 12 卡片文字出缘").summary()).isEqualTo("P3:act3-a");
         assertThat(route("V1/散文LaTeX: scenes[1].ttsText 含 LaTeX 标记").summary()).isEqualTo("P3:act2");
-        assertThat(route("V3: s05 itemRef=9 越界（generalMethod 共 3 条）").summary()).isEqualTo("P3:act4");
+        assertThat(route("V3: s06 itemRef=9 越界（generalMethod 共 3 条）").summary()).isEqualTo("P3:act4");
         assertThat(route("V2: L1 段 2 不一致：content='x' vs extracted='y'").summary()).isEqualTo("P1");
     }
 
@@ -302,7 +320,7 @@ class GenShardPipelineTest {
         verify(problemSlice, times(1)).format(any(), anyList());       // 仍 1 次（缓存）
         verify(materialShard, times(2)).generate(any(), any(), anyList());
         verify(sceneShard, times(3)).generate(any(), any(), anyList(), anyList(), anyList());   // 首轮未跑
-        assertThat(content.scenes()).hasSize(5);
+        assertThat(content.scenes()).hasSize(6);
     }
 
     @Test

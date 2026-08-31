@@ -28,6 +28,12 @@ import java.util.Set;
  *   <li>anchors 与 counts.steps 等长且每项指向真实存在的题干行 id（锚点行存在性）</li>
  *   <li>scenes：id 唯一、act∈{2,3,4}、组件在每幕白名单内、act 序非降、首场 problem-card、
  *       act2 至少一场 knowledge-card、act3/act4 各至少一场</li>
+ *   <li>scenes 计划级 stepRef 不变量（T18.1，违规零分片成本打回 P0 重排）：
+ *       R1 归属——step-card/derivation-popup 必带 1..counts.steps 整数、其余组件必不带；
+ *       R2 序列——step-card 的 stepRef 按 plan 顺序恰为 1..S（覆盖恰一次且有序，
+ *       计划级一次拦死 V1 规则7b/7c 同族结构病）；R3 popup 紧跟——derivation-popup
+ *       的前一项必须是同 stepRef 的 step-card（镜像 V1Structural 规则7a）。
+ *       R4（同 stepRef popup 至多一个）由 R3 隐式保证：第二个 popup 的前一项是 popup，必违 R3。</li>
  *   <li>glossary：非空，每条 term/standard 为字符串</li>
  * </ul>
  */
@@ -96,7 +102,7 @@ public class CoordinatorStation {
         checkCount(counts, "generalMethod", StationChecks.GENERAL_METHOD_MIN, StationChecks.GENERAL_METHOD_MAX, problems);
 
         checkAnchors(root.path("anchors"), counts, extract, problems);
-        checkScenes(root.path("scenes"), problems);
+        checkScenes(root.path("scenes"), counts, problems);
 
         JsonNode glossary = root.path("glossary");
         if (!glossary.isArray() || glossary.isEmpty()) {
@@ -145,26 +151,39 @@ public class CoordinatorStation {
         }
     }
 
-    /** 场景清单校验：id 唯一/act 白名单/每幕组件白名单/act 序非降/首场 problem-card/幕覆盖。 */
-    private static void checkScenes(JsonNode scenes, List<String> problems) {
+    /**
+     * 场景清单校验：id 唯一/act 白名单/每幕组件白名单/act 序非降/首场 problem-card/幕覆盖
+     * + 计划级 stepRef 不变量（T18.1：R1 归属、R2 step-card 序列恰为 1..steps、R3 popup 紧跟）。
+     * counts.steps 非法（缺/非整数）时 R1 范围检查与 R2 跳过（problems 已有对应条目，不级联误报）。
+     */
+    private static void checkScenes(JsonNode scenes, JsonNode counts, List<String> problems) {
         if (!scenes.isArray() || scenes.isEmpty()) {
             problems.add("骨架 scenes 缺失或不是非空数组");
             return;
         }
+        int steps = counts.path("steps").isInt() ? counts.path("steps").asInt() : -1;
         Set<String> ids = new HashSet<>();
         Integer prevAct = null;
+        String prevComponent = null;
+        Integer prevStepRef = null;
         boolean act2Knowledge = false;
         boolean act3Seen = false;
         boolean act4Seen = false;
+        List<Integer> stepCardRefs = new ArrayList<>();
+        boolean allStepCardRefsValid = true;
         for (int i = 0; i < scenes.size(); i++) {
             JsonNode scene = scenes.get(i);
             if (!scene.isObject()) {
                 problems.add("骨架 scenes[" + i + "] 不是对象");
+                prevComponent = null;
+                prevStepRef = null;
                 continue;
             }
             JsonNode id = scene.path("id");
             JsonNode act = scene.path("act");
             JsonNode component = scene.path("component");
+            JsonNode stepRef = scene.path("stepRef");
+            String tag = id.isTextual() ? id.asText() : "-";
             if (!id.isTextual()) {
                 problems.add("骨架 scenes[" + i + "] 缺必需字段 id");
             } else if (!ids.add(id.asText())) {
@@ -172,6 +191,8 @@ public class CoordinatorStation {
             }
             if (!act.isInt() || !Set.of(2, 3, 4).contains(act.asInt())) {
                 problems.add("骨架 scenes[" + i + "] act 不在 {2,3,4}");
+                prevComponent = null;
+                prevStepRef = null;
                 continue;
             }
             int actValue = act.asInt();
@@ -180,11 +201,29 @@ public class CoordinatorStation {
             }
             prevAct = actValue;
             Set<String> allowed = StationChecks.ACT_COMPONENTS.get(actValue);
-            if (!component.isTextual() || !StationChecks.COMPONENTS.contains(component.asText())) {
+            boolean componentValid = component.isTextual() && StationChecks.COMPONENTS.contains(component.asText());
+            if (!componentValid) {
                 problems.add("骨架 scenes[" + i + "] 组件 '" + (component.isTextual() ? component.asText() : "")
                         + "' 不在 7 组件白名单");
             } else if (!allowed.contains(component.asText())) {
                 problems.add("骨架 scenes[" + i + "] 组件 '" + component.asText() + "' 不允许出现在 act" + actValue);
+            }
+            if (componentValid) {
+                // R1 stepRef 归属：step-card/derivation-popup 必带 1..steps 整数，其余组件必不带
+                boolean refOk = checkStepRefOwnership(i, tag, component.asText(), stepRef, steps,
+                        stepCardRefs, problems);
+                if ("step-card".equals(component.asText())) {
+                    allStepCardRefsValid &= refOk;
+                }
+                // R3 popup 紧跟（镜像 V1Structural 规则7a）：popup 前一项必须是同 stepRef 的 step-card
+                if ("derivation-popup".equals(component.asText()) && refOk) {
+                    boolean follows = "step-card".equals(prevComponent) && prevStepRef != null
+                            && prevStepRef == stepRef.asInt();
+                    if (!follows) {
+                        problems.add("骨架 scenes[" + i + "](" + tag + ") derivation-popup 未紧跟同 stepRef 的 step-card"
+                                + "（计划级 popup 紧跟，场景片改不动）");
+                    }
+                }
             }
             if (i == 0 && !"problem-card".equals(component.asText())) {
                 problems.add("骨架 scenes[0] 组件应为 problem-card（首场）");
@@ -194,6 +233,21 @@ public class CoordinatorStation {
             }
             act3Seen |= actValue == 3;
             act4Seen |= actValue == 4;
+            prevComponent = component.isTextual() ? component.asText() : null;
+            prevStepRef = stepRef.isInt() ? stepRef.asInt() : null;
+        }
+        // R2 step-card 覆盖恰一次且有序：stepRef 序列（按 plan 顺序）必须恰为 1..steps
+        // （缺步/重步/乱序计划级一次拦死，等价 V1 规则7b/7c）。有 step-card 缺/坏 stepRef
+        // （R1 已记）或 counts.steps 非法（checkCount 已记）时跳过，不级联误报。
+        if (steps >= 1 && allStepCardRefsValid) {
+            List<Integer> expected = new ArrayList<>();
+            for (int s = 1; s <= steps; s++) {
+                expected.add(s);
+            }
+            if (!stepCardRefs.equals(expected)) {
+                problems.add("骨架 scenes step-card 的 stepRef 序列 " + stepCardRefs + " 应为 1.." + steps
+                        + "（缺步/重步/乱序均不允许，计划级一次拦死）");
+            }
         }
         if (!act2Knowledge) {
             problems.add("骨架 scenes act2 缺 knowledge-card（至少 1 场）");
@@ -204,5 +258,36 @@ public class CoordinatorStation {
         if (!act4Seen) {
             problems.add("骨架 scenes 缺 act4 场景（至少 1 场）");
         }
+    }
+
+    /**
+     * R1 stepRef 归属单场校验：返回该场 stepRef 是否合法（1..steps 内的有效整数）。
+     * step-card 的合法值顺带收进 {@code stepCardRefs}（R2 序列核对的输入）；
+     * counts.steps 非法（steps&lt;1）时只查存在性不查范围（checkCount 已记，不级联）。
+     */
+    private static boolean checkStepRefOwnership(int i, String tag, String componentName, JsonNode stepRef,
+                                                 int steps, List<Integer> stepCardRefs, List<String> problems) {
+        boolean stepBearing = "step-card".equals(componentName) || "derivation-popup".equals(componentName);
+        if (stepBearing) {
+            if (!stepRef.isInt()) {
+                problems.add("骨架 scenes[" + i + "](" + tag + ") " + componentName
+                        + " 缺 stepRef 或不是整数（计划级步骤分派必需）");
+                return false;
+            }
+            if (steps >= 1 && (stepRef.asInt() < 1 || stepRef.asInt() > steps)) {
+                problems.add("骨架 scenes[" + i + "](" + tag + ") " + componentName
+                        + " stepRef=" + stepRef.asInt() + " 超出 1.." + steps + "（计划级步骤分派范围）");
+                return false;
+            }
+            if ("step-card".equals(componentName)) {
+                stepCardRefs.add(stepRef.asInt());
+            }
+            return true;
+        }
+        if (!stepRef.isMissingNode()) {
+            problems.add("骨架 scenes[" + i + "](" + tag + ") " + componentName
+                    + " 不得携带 stepRef（仅 step-card/derivation-popup 分派步骤）");
+        }
+        return false;
     }
 }

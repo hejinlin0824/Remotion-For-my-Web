@@ -51,9 +51,9 @@ class SceneShardStationSlowIT {
                 .generate(extract, MaterialShardStationSlowITSupport.materialSkeleton());
 
         List<Skeleton.ScenePlan> plan = List.of(
-                new Skeleton.ScenePlan("s05", 3, "step-card"),
-                new Skeleton.ScenePlan("s06", 3, "derivation-popup"),
-                new Skeleton.ScenePlan("s07", 3, "step-card"));
+                new Skeleton.ScenePlan("s05", 3, "step-card", 1),
+                new Skeleton.ScenePlan("s06", 3, "derivation-popup", 1),
+                new Skeleton.ScenePlan("s07", 3, "step-card", 2));
         List<ContentJson.Scene> scenes = new SceneShardStation(
                 new GlmClient(new JdkHttpTransport(props), new Secrets(), props))
                 .generate(extract, material, plan, MaterialShardStationSlowITSupport.glossary());
@@ -79,9 +79,9 @@ class SceneShardStationSlowIT {
                 new GlmClient(new JdkHttpTransport(props), new Secrets(), props))
                 .generate(extract, MaterialShardStationSlowITSupport.materialSkeleton());
         List<Skeleton.ScenePlan> plan = List.of(
-                new Skeleton.ScenePlan("s05", 3, "step-card"),
-                new Skeleton.ScenePlan("s06", 3, "derivation-popup"),
-                new Skeleton.ScenePlan("s07", 3, "step-card"));
+                new Skeleton.ScenePlan("s05", 3, "step-card", 1),
+                new Skeleton.ScenePlan("s06", 3, "derivation-popup", 1),
+                new Skeleton.ScenePlan("s07", 3, "step-card", 2));
         List<ContentJson.Scene> scenes = new SceneShardStation(
                 new GlmClient(new JdkHttpTransport(props), new Secrets(), props))
                 .generate(extract, material, plan, MaterialShardStationSlowITSupport.glossary());
@@ -125,9 +125,9 @@ final class MaterialShardStationSlowITSupport {
 
     static Skeleton materialSkeleton() {
         List<Skeleton.ScenePlan> scenes = new ArrayList<>();
-        scenes.add(new Skeleton.ScenePlan("s01", 2, "problem-card"));
-        scenes.add(new Skeleton.ScenePlan("s05", 3, "step-card"));
-        scenes.add(new Skeleton.ScenePlan("s15", 4, "general-list"));
+        scenes.add(new Skeleton.ScenePlan("s01", 2, "problem-card", null));
+        scenes.add(new Skeleton.ScenePlan("s05", 3, "step-card", 1));
+        scenes.add(new Skeleton.ScenePlan("s15", 4, "general-list", null));
         return new Skeleton("计算题", new Skeleton.Counts(3, 5, 2, 3),
                 List.of("L1", "L2", "L2", "L3", "L3"), scenes,
                 glossary());

@@ -44,15 +44,16 @@ public class MaterialShardStationTest {
                     new ExtractResult.Seg("math", "a"),
                     new ExtractResult.Seg("text", " 的取值范围。")))));
 
-    /** 范围内最小合法骨架（与 VALID_JSON 同计划）。 */
+    /** 范围内最小合法骨架（与 VALID_JSON 同计划；stepRef 计划级分派 1..steps 自洽，T18.1）。 */
     static final Skeleton SKELETON = new Skeleton("计算题",
             new Skeleton.Counts(2, 3, 1, 3),
             List.of("L1", "L2", "L3"),
-            List.of(new Skeleton.ScenePlan("s01", 2, "problem-card"),
-                    new Skeleton.ScenePlan("s02", 2, "knowledge-card"),
-                    new Skeleton.ScenePlan("s03", 3, "step-card"),
-                    new Skeleton.ScenePlan("s04", 3, "step-card"),
-                    new Skeleton.ScenePlan("s05", 4, "general-list")),
+            List.of(new Skeleton.ScenePlan("s01", 2, "problem-card", null),
+                    new Skeleton.ScenePlan("s02", 2, "knowledge-card", null),
+                    new Skeleton.ScenePlan("s03", 3, "step-card", 1),
+                    new Skeleton.ScenePlan("s04", 3, "step-card", 2),
+                    new Skeleton.ScenePlan("s05", 3, "step-card", 3),
+                    new Skeleton.ScenePlan("s06", 4, "general-list", null)),
             List.of(new Skeleton.GlossaryTerm("判别式", "判别式（记号 Δ）")));
 
     /** 与骨架计划完全一致的素材输出。 */
@@ -173,7 +174,7 @@ public class MaterialShardStationTest {
         Skeleton plan = new Skeleton("计算题",
                 new Skeleton.Counts(4, 6, 3, 4),
                 List.of("L1", "L2", "L2", "L3", "L3", "L3"),
-                List.of(new Skeleton.ScenePlan("s01", 2, "problem-card")),
+                List.of(new Skeleton.ScenePlan("s01", 2, "problem-card", null)),
                 List.of(new Skeleton.GlossaryTerm("判别式", "判别式")));
         when(glm.chat(eq(Prompts.MATERIAL), anyString())).thenReturn(raw);
 

@@ -100,7 +100,7 @@ class MaterialShardStationSlowIT {
     private static Skeleton skeleton() {
         return new Skeleton("计算题", new Skeleton.Counts(3, 5, 2, 3),
                 List.of("L1", "L2", "L2", "L3", "L3"),
-                List.of(new Skeleton.ScenePlan("s01", 2, "problem-card")),
+                List.of(new Skeleton.ScenePlan("s01", 2, "problem-card", null)),
                 List.of(new Skeleton.GlossaryTerm("判别式", "判别式（记号 Δ）")));
     }
 

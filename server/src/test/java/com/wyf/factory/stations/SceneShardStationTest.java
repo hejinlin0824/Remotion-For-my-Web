@@ -22,7 +22,8 @@ import static org.mockito.Mockito.when;
 /**
  * GEN-P3..Pn 场景片工位单元测试（T18）：mock GlmClient。
  * 骨架绑定校验 = scenes 与 plan 逐场一致（id/顺序/act/component，不得增删改）+ 必备字段
- * + popup formula 非空；fixture 回放 = 真调剧本响应的 scenes 切片。
+ * + popup formula 非空 + 计划钉死（T18.1：step-card/derivation-popup 的 props.stepRef
+ * 必须照抄 plan 的 stepRef，缺/不等/多带均违规）；fixture 回放 = 真调剧本响应的 scenes 切片。
  */
 class SceneShardStationTest {
 
@@ -39,12 +40,12 @@ class SceneShardStationTest {
                     new Material.MethodItem("转化：单调⇔导数恒≥0", "含参二次上判别式"),
                     new Material.MethodItem("求解并回验", "取等情形代回验证")));
 
-    /** 本片计划（act3 后半：两 step-card + 一 popup + 一 pitfall + 一 checklist）。 */
+    /** 本片计划（act3 后半：两 step-card + 一 popup + 一 pitfall + 一 checklist；stepRef 计划级分派）。 */
     private static final List<Skeleton.ScenePlan> PLAN = List.of(
-            new Skeleton.ScenePlan("s03", 3, "step-card"),
-            new Skeleton.ScenePlan("s04", 3, "derivation-popup"),
-            new Skeleton.ScenePlan("s05", 3, "pitfall-card"),
-            new Skeleton.ScenePlan("s06", 3, "checklist-card"));
+            new Skeleton.ScenePlan("s03", 3, "step-card", 1),
+            new Skeleton.ScenePlan("s04", 3, "derivation-popup", 1),
+            new Skeleton.ScenePlan("s05", 3, "pitfall-card", null),
+            new Skeleton.ScenePlan("s06", 3, "checklist-card", null));
 
     private static final List<Skeleton.GlossaryTerm> GLOSSARY =
             List.of(new Skeleton.GlossaryTerm("判别式", "判别式（记号 Δ）"));
@@ -134,6 +135,42 @@ class SceneShardStationTest {
                 .hasMessageContaining("场景片 scenes[1] derivation-popup 缺 props.formula");
     }
 
+    // ---- T18.1 计划钉死（props.stepRef 照抄 plan，不许多也不许少） ----
+
+    @Test
+    @DisplayName("stepRef 钉死·缺失：step-card 输出缺 props.stepRef → retryable 且消息含计划值")
+    void stepRefMissingFromProps_retryable() {
+        String missing = VALID_JSON.replace("\"props\":{\"stepRef\":1}}", "\"props\":{}}");
+        when(glm.chat(eq(Prompts.SCENE), anyString())).thenReturn(missing);
+
+        assertThatThrownBy(() -> station.generate(EXTRACT, MATERIAL, PLAN, GLOSSARY))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("场景片 scenes[0] step-card 缺 props.stepRef（计划 stepRef=1，必须照抄）");
+    }
+
+    @Test
+    @DisplayName("stepRef 钉死·不等：props.stepRef=2 ≠ 计划 stepRef=1 → retryable（不得自选步骤）")
+    void stepRefDeviatedFromPlan_retryable() {
+        String deviated = VALID_JSON.replace("\"props\":{\"stepRef\":1}}", "\"props\":{\"stepRef\":2}}");
+        when(glm.chat(eq(Prompts.SCENE), anyString())).thenReturn(deviated);
+
+        assertThatThrownBy(() -> station.generate(EXTRACT, MATERIAL, PLAN, GLOSSARY))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("场景片 scenes[0] props.stepRef=2 与骨架计划 stepRef=1 不一致")
+                .hasMessageContaining("不得自选步骤");
+    }
+
+    @Test
+    @DisplayName("stepRef 钉死·多余：非 step 场景（pitfall-card）带 props.stepRef → retryable")
+    void stepRefExtraOnNonStepScene_retryable() {
+        String extra = VALID_JSON.replace("\"props\":{\"pitfallRef\":1}}", "\"props\":{\"pitfallRef\":1,\"stepRef\":1}}");
+        when(glm.chat(eq(Prompts.SCENE), anyString())).thenReturn(extra);
+
+        assertThatThrownBy(() -> station.generate(EXTRACT, MATERIAL, PLAN, GLOSSARY))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("场景片 scenes[2] pitfall-card 计划无 stepRef，输出不得携带 props.stepRef");
+    }
+
     @Test
     @DisplayName("ttsText 缺失/空白 → retryable；非 JSON → retryable")
     void missingTtsText_andNonJson_retryable() {
@@ -156,7 +193,9 @@ class SceneShardStationTest {
         List<Skeleton.ScenePlan> plan = new java.util.ArrayList<>();
         for (int i = 0; i < fixtureScenes.size(); i++) {
             com.fasterxml.jackson.databind.JsonNode s = fixtureScenes.get(i);
-            plan.add(new Skeleton.ScenePlan(s.path("id").asText(), s.path("act").asInt(), s.path("component").asText()));
+            com.fasterxml.jackson.databind.JsonNode planRef = s.path("props").path("stepRef");   // 计划级 stepRef 与输出同源（fixture 自洽）
+            plan.add(new Skeleton.ScenePlan(s.path("id").asText(), s.path("act").asInt(),
+                    s.path("component").asText(), planRef.isInt() ? planRef.asInt() : null));
         }
         when(glm.chat(eq(Prompts.SCENE), anyString())).thenReturn(raw);
 
