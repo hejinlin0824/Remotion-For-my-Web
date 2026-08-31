@@ -18,7 +18,9 @@ import java.util.regex.Pattern;
  *
  * <p>每条规则一个私有方法，错误消息格式 {@code "V1/<规则名>: <具体差异>"}，
  * 供 T10 编排器回传 LLM 修正。audio_meta 一致性归 T8，此处不查。
- * 另含散文字段 LaTeX 禁令（T11 冒烟实证：裸 LaTeX 写进 statement 会被模板按纯文本渲染）。</p>
+ * 另含散文字段 LaTeX 禁令（T11 冒烟实证：裸 LaTeX 写进 statement 会被模板按纯文本渲染）。
+ * T20a 追加排版预算封版（R-宽度①题干行宽 / R-宽度②列表高度 / R-字符①字数硬约束），
+ * 实现于 {@link V1Budget}，在 {@link #validate} 尾部调用——既有规则零改动。</p>
  */
 @Component
 public class V1Structural implements Validator {
@@ -58,6 +60,7 @@ public class V1Structural implements Validator {
         checkChecklistUnique(scenes, errors);
         checkItemRefSequence(scenes, content, errors);
         checkProseNoLatex(content, errors);
+        V1Budget.check(content, errors);   // T20a 预算封版：R-宽度①②/R-字符①（只增不改，见 V1Budget）
 
         return errors.isEmpty() ? ValidationResult.ok() : ValidationResult.fail(errors);
     }

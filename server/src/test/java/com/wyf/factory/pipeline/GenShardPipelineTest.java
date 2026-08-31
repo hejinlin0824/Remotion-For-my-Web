@@ -253,6 +253,17 @@ class GenShardPipelineTest {
         assertThat(plan.errorsFor(GenShardPipeline.P0)).isEmpty();
     }
 
+    @Test
+    @DisplayName("路由映射表（T20a 预算规则）：题干宽→P1；列表高/字数超限→P2（报错措辞自带路由令牌）")
+    void routeTable_v1BudgetMessages_routeP1P2() {
+        assertThat(route("V1/题干宽: problem.lines[2] 估宽 2246px 超出题干面板预算（缩放 0.566 低于下限 0.6，渲染必溢出）")
+                .summary()).isEqualTo("P1");
+        assertThat(route("V1/列表高: generalMethod[2]（通法列表 itemRef=3）估算高度 1494.0px 超出可用高度 705.6px（缩放 0.472 低于下限 0.55，渲染必溢出）")
+                .summary()).isEqualTo("P2");
+        assertThat(route("V1/字数超限: pitfalls[0].claim 长度 21 码点超出上限 20")
+                .summary()).isEqualTo("P2");
+    }
+
     // ---- 3. 轮内只补错片（缓存复用） ----
 
     @Test
