@@ -24,7 +24,8 @@ import java.util.Set;
  * <p>骨架校验（违反抛 retryable {@link GlmException}，差异清单即回传重试清单）：</p>
  * <ul>
  *   <li>problemType ∈ {基础题,计算题,证明题,应用题}</li>
- *   <li>counts 四段条数在 StationChecks 既有 MIN/MAX 范围内</li>
+ *   <li>counts 四段条数在题型骨架规格（{@link SkeletonLibrary}）范围内；problemType 非法/缺失
+ *       时回落 StationChecks 全局常量（=计算题规格），题型门已记 problems 不二次记错（T20b）</li>
  *   <li>anchors 与 counts.steps 等长且每项指向真实存在的题干行 id（锚点行存在性）</li>
  *   <li>scenes：id 唯一、act∈{2,3,4}、组件在每幕白名单内、act 序非降、首场 problem-card、
  *       act2 至少一场 knowledge-card、act3/act4 各至少一场</li>
@@ -90,16 +91,20 @@ public class CoordinatorStation {
     /** 骨架校验：全部规则逐条记差异（一条不漏，回传清单一次性纠全）。 */
     private static void validate(JsonNode root, ExtractResult extract, List<String> problems) {
         JsonNode problemType = root.path("problemType");
-        if (!problemType.isTextual() || !StationChecks.PROBLEM_TYPES.contains(problemType.asText())) {
-            problems.add("骨架 problemType='%s' 不在 {基础题,计算题,证明题,应用题}"
-                    .formatted(problemType.isTextual() ? problemType.asText() : ""));
+        String typeName = problemType.isTextual() ? problemType.asText() : "";
+        if (!StationChecks.PROBLEM_TYPES.contains(typeName)) {
+            problems.add("骨架 problemType='%s' 不在 {基础题,计算题,证明题,应用题}".formatted(typeName));
         }
 
+        // T20b 题型骨架规格：合法题型查 SkeletonLibrary，非法/缺失回落全局常量（=计算题规格）。
+        // 题型门在上面已记 problems，此处不二次记错（镜像 T18.1 counts.steps 非法防级联范式）。
+        SkeletonLibrary.Spec spec = SkeletonLibrary.spec(typeName.isEmpty() ? null : typeName);
+        String typeLabel = typeName.isEmpty() ? "-" : typeName;
         JsonNode counts = root.path("counts");
-        checkCount(counts, "knowledge", StationChecks.KNOWLEDGE_MIN, StationChecks.KNOWLEDGE_MAX, problems);
-        checkCount(counts, "steps", StationChecks.STEPS_MIN, StationChecks.STEPS_MAX, problems);
-        checkCount(counts, "pitfalls", StationChecks.PITFALLS_MIN, StationChecks.PITFALLS_MAX, problems);
-        checkCount(counts, "generalMethod", StationChecks.GENERAL_METHOD_MIN, StationChecks.GENERAL_METHOD_MAX, problems);
+        checkCount(counts, typeLabel, "knowledge", spec.knowledge(), problems);
+        checkCount(counts, typeLabel, "steps", spec.steps(), problems);
+        checkCount(counts, typeLabel, "pitfalls", spec.pitfalls(), problems);
+        checkCount(counts, typeLabel, "generalMethod", spec.generalMethod(), problems);
 
         checkAnchors(root.path("anchors"), counts, extract, problems);
         checkScenes(root.path("scenes"), counts, problems);
@@ -117,12 +122,16 @@ public class CoordinatorStation {
         }
     }
 
-    private static void checkCount(JsonNode counts, String name, int min, int max, List<String> problems) {
+    /** 条数校验（T20b 按题型规格）：越界消息含题型令牌与上下限（如「骨架（证明题）steps=3 低于下限 4」）。 */
+    private static void checkCount(JsonNode counts, String typeLabel, String name, SkeletonLibrary.Range range,
+                                   List<String> problems) {
         JsonNode value = counts.path(name);
         if (!value.isInt()) {
             problems.add("骨架 counts." + name + " 缺失或不是整数");
-        } else if (value.asInt() < min || value.asInt() > max) {
-            problems.add("骨架 counts." + name + " 条数 " + value.asInt() + " 超出范围 " + min + "-" + max);
+        } else if (value.asInt() < range.min()) {
+            problems.add("骨架（" + typeLabel + "）" + name + "=" + value.asInt() + " 低于下限 " + range.min());
+        } else if (value.asInt() > range.max()) {
+            problems.add("骨架（" + typeLabel + "）" + name + "=" + value.asInt() + " 高于上限 " + range.max());
         }
     }
 

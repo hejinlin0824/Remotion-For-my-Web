@@ -14,7 +14,8 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 分片 prompt 漂移守护（T6 评审 M 项起源，T18 分片生成重构<b>有意更新</b>）：
+ * 分片 prompt 漂移守护（T6 评审 M 项起源，T18 分片生成重构<b>有意更新</b>，T20b 再重录：
+ * COORDINATOR 末尾追加题型骨架段，golden few-shot 示例段零变化断言保留）：
  * golden（封版模板 template/src/data/content.json，只读单源）few-shot 必须在分片 prompt
  * 中逐字注入——题干片吃 golden problem 段、素材片吃 golden 四段素材、场景片吃 golden
  * scenes 切片（s10..s14）、协调者吃 golden 派生骨架（条数/锚点/全部场景 id）。
@@ -75,7 +76,7 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("COORDINATOR 与 golden 同步：条数计划/锚点指派/全部场景 id 逐字注入（T18.1 有意重录：+stepRef 计划级分派）")
+    @DisplayName("COORDINATOR 与 golden 同步：条数计划/锚点指派/全部场景 id 逐字注入（T20b 有意重录：末尾追加题型骨架段，golden 示例段零变化）")
     void coordinatorPromptStaysInSyncWithGolden() throws Exception {
         JsonNode golden = MAPPER.readTree(goldenFile.toFile());
         assertThat(Prompts.COORDINATOR)
@@ -103,6 +104,20 @@ class PromptsDriftGuardTest {
                 .contains("\"id\":\"s09\",\"act\":3,\"component\":\"derivation-popup\",\"stepRef\":3")
                 .as("非 step 场景不带 stepRef（problem-card 形态无该字段）")
                 .contains("{\"id\":\"s01\",\"act\":2,\"component\":\"problem-card\"}");
+        // T20b 重录：题型骨架段只做末尾静态追加——golden few-shot 示例段（counts/anchors/全场景
+        // id，上文全部断言）与规则主体一字未动；追加段四小节逐字在位，且在 golden 示例段之后。
+        assertThat(Prompts.COORDINATOR)
+                .as("规则主体零变化：全局硬性范围行保持（题型差异只在追加段与 SkeletonLibrary 规格表）")
+                .contains("counts 条数硬性范围：knowledge 2-4 条 / steps 3-10 条 / pitfalls 1-3 条 / generalMethod 3-6 条")
+                .as("题型骨架段四小节逐字")
+                .contains("题型骨架段（按输入题目的 problemType 适用对应小节）：")
+                .contains("- 基础题：单知识点、推导直白，步骤 3-6 条从简；derivation-popup 只配最关键的一步。")
+                .contains("- 计算题：按上文通用规则与示例执行。")
+                .contains("- 证明题：逻辑链完整不跳步，步骤至少 4 条；每个 step-card 都配 derivation-popup 展示该步依据。")
+                .contains("- 应用题：前两步通常是设参/建模，步骤 4-8 条；generalMethod 侧重建模通法而非纯计算技巧。");
+        assertThat(Prompts.COORDINATOR.indexOf("题型骨架段"))
+                .as("追加只在常量末尾：题型骨架段在 golden 示例段（JSON）之后")
+                .isGreaterThan(Prompts.COORDINATOR.indexOf("示例（golden 题："));
     }
 
     @Test

@@ -10,6 +10,7 @@ import org.mockito.ArgumentCaptor;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -137,14 +138,14 @@ class CoordinatorStationTest {
     }
 
     @Test
-    @DisplayName("条数越界：counts.knowledge=5 超出 2-4 → retryable")
+    @DisplayName("条数越界：counts.knowledge=5 超出 2-4 → retryable（T20b 消息含题型令牌）")
     void countOutOfRange_retryable() {
         String broken = VALID_JSON.replace("\"knowledge\":3", "\"knowledge\":5");
         when(glm.chat(eq(Prompts.COORDINATOR), anyString())).thenReturn(broken);
 
         assertThatThrownBy(() -> station.generate(EXTRACT))
                 .isInstanceOf(GlmException.class)
-                .hasMessageContaining("骨架 counts.knowledge 条数 5 超出范围 2-4");
+                .hasMessageContaining("骨架（计算题）knowledge=5 高于上限 4");
     }
 
     @Test
@@ -272,5 +273,145 @@ class CoordinatorStationTest {
                 .hasMessageContaining("骨架 counts.steps 缺失或不是整数")
                 .hasMessageNotContaining("超出 1..")
                 .hasMessageNotContaining("stepRef 序列");
+    }
+
+    // ---- T20b 题型骨架规格（problemType → 四段条数范围；P0 机器牙齿=checkCount 按题型查表） ----
+
+    /**
+     * 按题型与四段条数构造合法骨架 JSON（T20b 边界夹具）：锚点循环取 L1/L2/L3（与 steps 等长），
+     * step-card 恰为 1..steps（R2 自洽），knowledge/pitfall/general-list 场景数与 counts 同数。
+     */
+    private static String skeleton(String problemType, int knowledge, int steps, int pitfalls, int generalMethod) {
+        StringBuilder scenes = new StringBuilder("[{\"id\":\"s01\",\"act\":2,\"component\":\"problem-card\"}");
+        int id = 2;
+        for (int k = 0; k < knowledge; k++) {
+            scenes.append(",{\"id\":\"s%02d\",\"act\":2,\"component\":\"knowledge-card\"}".formatted(id++));
+        }
+        for (int s = 1; s <= steps; s++) {
+            scenes.append(",{\"id\":\"s%02d\",\"act\":3,\"component\":\"step-card\",\"stepRef\":%d}".formatted(id++, s));
+        }
+        for (int p = 0; p < pitfalls; p++) {
+            scenes.append(",{\"id\":\"s%02d\",\"act\":3,\"component\":\"pitfall-card\"}".formatted(id++));
+        }
+        scenes.append(",{\"id\":\"s%02d\",\"act\":3,\"component\":\"checklist-card\"}".formatted(id++));
+        for (int m = 0; m < generalMethod; m++) {
+            scenes.append(",{\"id\":\"s%02d\",\"act\":4,\"component\":\"general-list\"}".formatted(id++));
+        }
+        scenes.append(']');
+        StringBuilder anchors = new StringBuilder("[");
+        String[] lineIds = {"L1", "L2", "L3"};
+        for (int s = 0; s < steps; s++) {
+            if (s > 0) {
+                anchors.append(',');
+            }
+            anchors.append('"').append(lineIds[s % lineIds.length]).append('"');
+        }
+        anchors.append(']');
+        return ("{\"problemType\":\"%s\",\"counts\":{\"knowledge\":%d,\"steps\":%d,\"pitfalls\":%d,\"generalMethod\":%d},"
+                + "\"anchors\":%s,\"scenes\":%s,\"glossary\":[{\"term\":\"判别式\",\"standard\":\"判别式（记号 Δ）\"}]}")
+                .formatted(problemType, knowledge, steps, pitfalls, generalMethod, anchors, scenes);
+    }
+
+    @Test
+    @DisplayName("T20b 基础题 steps 边界：3/6 合法，2 低于下限 3，7 高于上限 6（题型令牌逐字）")
+    void basicTypeStepBoundaries() {
+        when(glm.chat(eq(Prompts.COORDINATOR), anyString()))
+                .thenReturn(skeleton("基础题", 2, 3, 1, 3))
+                .thenReturn(skeleton("基础题", 2, 6, 1, 3))
+                .thenReturn(skeleton("基础题", 2, 2, 1, 3))
+                .thenReturn(skeleton("基础题", 2, 7, 1, 3));
+
+        assertThatCode(() -> station.generate(EXTRACT)).doesNotThrowAnyException();
+        assertThatCode(() -> station.generate(EXTRACT)).doesNotThrowAnyException();
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架（基础题）steps=2 低于下限 3")
+                .extracting("retryable")
+                .isEqualTo(true);
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架（基础题）steps=7 高于上限 6");
+    }
+
+    @Test
+    @DisplayName("T20b 证明题 steps 边界：4/10 合法，3 低于下限 4（逻辑链完整下限），11 高于上限 10")
+    void proofTypeStepBoundaries() {
+        when(glm.chat(eq(Prompts.COORDINATOR), anyString()))
+                .thenReturn(skeleton("证明题", 2, 4, 1, 3))
+                .thenReturn(skeleton("证明题", 2, 10, 1, 3))
+                .thenReturn(skeleton("证明题", 2, 3, 1, 3))
+                .thenReturn(skeleton("证明题", 2, 11, 1, 3));
+
+        assertThatCode(() -> station.generate(EXTRACT)).doesNotThrowAnyException();
+        assertThatCode(() -> station.generate(EXTRACT)).doesNotThrowAnyException();
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架（证明题）steps=3 低于下限 4");
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架（证明题）steps=11 高于上限 10");
+    }
+
+    @Test
+    @DisplayName("T20b 应用题/计算题 steps 抽查：应用题 4-8 两端越界；计算题维持全局 3-10（golden 规格）")
+    void applicationAndCalcTypeStepSpotChecks() {
+        when(glm.chat(eq(Prompts.COORDINATOR), anyString()))
+                .thenReturn(skeleton("应用题", 2, 3, 1, 3))
+                .thenReturn(skeleton("应用题", 2, 9, 1, 3))
+                .thenReturn(skeleton("计算题", 2, 2, 1, 3))
+                .thenReturn(skeleton("计算题", 2, 11, 1, 3));
+
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架（应用题）steps=3 低于下限 4");
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架（应用题）steps=9 高于上限 8");
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架（计算题）steps=2 低于下限 3");
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架（计算题）steps=11 高于上限 10");
+    }
+
+    @Test
+    @DisplayName("T20b 基础题其他段抽查：knowledge 2-3 / pitfalls 1-2 / generalMethod 3-4 越界均带题型令牌")
+    void basicTypeOtherSectionSpotChecks() {
+        when(glm.chat(eq(Prompts.COORDINATOR), anyString()))
+                .thenReturn(skeleton("基础题", 4, 4, 1, 3))
+                .thenReturn(skeleton("基础题", 2, 4, 3, 3))
+                .thenReturn(skeleton("基础题", 2, 4, 1, 5));
+
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架（基础题）knowledge=4 高于上限 3");
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架（基础题）pitfalls=3 高于上限 2");
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架（基础题）generalMethod=5 高于上限 4");
+    }
+
+    @Test
+    @DisplayName("T20b 防级联：problemType 非法/缺失时 counts 回落全局常量检查，不二次记题型类错误")
+    void invalidProblemType_fallsBackToGlobal_noDoubleCountErrors() {
+        String invalidType = skeleton("问答题", 4, 3, 1, 3);
+        String missingType = invalidType.replace("\"problemType\":\"问答题\",", "");
+        when(glm.chat(eq(Prompts.COORDINATOR), anyString())).thenReturn(invalidType, missingType);
+
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架 problemType='问答题' 不在 {基础题,计算题,证明题,应用题}")
+                .hasMessageNotContaining("低于下限")
+                .hasMessageNotContaining("高于上限")
+                .hasMessageNotContaining("超出范围");
+        assertThatThrownBy(() -> station.generate(EXTRACT))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("骨架 problemType='' 不在 {基础题,计算题,证明题,应用题}")
+                .hasMessageNotContaining("低于下限")
+                .hasMessageNotContaining("高于上限")
+                .hasMessageNotContaining("超出范围");
     }
 }

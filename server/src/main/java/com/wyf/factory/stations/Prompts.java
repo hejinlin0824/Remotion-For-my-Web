@@ -29,6 +29,8 @@ public final class Prompts {
     /**
      * GEN-P0 协调者工位：题干 JSON → 分片骨架 {"problemType","counts","anchors","scenes","glossary"}。
      * 职责 = 条数计划 + 锚点指派（分片只领不造）+ 场景清单 + 术语统一。输出小、职责单一。
+     * 末尾「题型骨架段」（T20b 静态追加，规则主体与 golden few-shot 一字未动）：四题型条数/结构
+     * 指引，机器牙齿在 {@link CoordinatorStation} 按题型查 {@link SkeletonLibrary} 规格表。
      */
     public static final String COORDINATOR = """
             你是考研数学讲题视频的生成协调者（总规划师）。用户给你题目 JSON（{"problemType":...,"lines":[{id,segments:[{type,value}]}]}，type="math" 的 value 是 LaTeX 源码）。你不写正文内容，只产出一份骨架 JSON，供后续分片工位（题干排版/素材正文/场景分镜）照着填内容。只输出 JSON 本身，不要 markdown 代码块，不要解释。
@@ -51,7 +53,13 @@ public final class Prompts {
             - glossary：3-8 条全片关键术语的统一叫法（如「判别式」「单调递增」「恒成立」），后续分片凡提到这些术语必须照表用词
 
             示例（golden 题：f(x)=x^{3}+ax^{2}+x 在 R 上单调递增求 a）：
-            {"problemType":"计算题","counts":{"knowledge":3,"steps":5,"pitfalls":2,"generalMethod":3},"anchors":["L1","L2","L2","L3","L3"],"scenes":[{"id":"s01","act":2,"component":"problem-card"},{"id":"s02","act":2,"component":"knowledge-card"},{"id":"s03","act":2,"component":"knowledge-card"},{"id":"s04","act":2,"component":"knowledge-card"},{"id":"s05","act":3,"component":"step-card","stepRef":1},{"id":"s06","act":3,"component":"derivation-popup","stepRef":1},{"id":"s07","act":3,"component":"step-card","stepRef":2},{"id":"s08","act":3,"component":"step-card","stepRef":3},{"id":"s09","act":3,"component":"derivation-popup","stepRef":3},{"id":"s10","act":3,"component":"step-card","stepRef":4},{"id":"s11","act":3,"component":"step-card","stepRef":5},{"id":"s12","act":3,"component":"pitfall-card"},{"id":"s13","act":3,"component":"pitfall-card"},{"id":"s14","act":3,"component":"checklist-card"},{"id":"s15","act":4,"component":"general-list"},{"id":"s16","act":4,"component":"general-list"},{"id":"s17","act":4,"component":"general-list"}],"glossary":[{"term":"判别式","standard":"判别式（记号 Δ）"},{"term":"单调递增","standard":"单调递增"},{"term":"恒成立","standard":"恒成立"}]}""";
+            {"problemType":"计算题","counts":{"knowledge":3,"steps":5,"pitfalls":2,"generalMethod":3},"anchors":["L1","L2","L2","L3","L3"],"scenes":[{"id":"s01","act":2,"component":"problem-card"},{"id":"s02","act":2,"component":"knowledge-card"},{"id":"s03","act":2,"component":"knowledge-card"},{"id":"s04","act":2,"component":"knowledge-card"},{"id":"s05","act":3,"component":"step-card","stepRef":1},{"id":"s06","act":3,"component":"derivation-popup","stepRef":1},{"id":"s07","act":3,"component":"step-card","stepRef":2},{"id":"s08","act":3,"component":"step-card","stepRef":3},{"id":"s09","act":3,"component":"derivation-popup","stepRef":3},{"id":"s10","act":3,"component":"step-card","stepRef":4},{"id":"s11","act":3,"component":"step-card","stepRef":5},{"id":"s12","act":3,"component":"pitfall-card"},{"id":"s13","act":3,"component":"pitfall-card"},{"id":"s14","act":3,"component":"checklist-card"},{"id":"s15","act":4,"component":"general-list"},{"id":"s16","act":4,"component":"general-list"},{"id":"s17","act":4,"component":"general-list"}],"glossary":[{"term":"判别式","standard":"判别式（记号 Δ）"},{"term":"单调递增","standard":"单调递增"},{"term":"恒成立","standard":"恒成立"}]}
+
+            题型骨架段（按输入题目的 problemType 适用对应小节）：
+            - 基础题：单知识点、推导直白，步骤 3-6 条从简；derivation-popup 只配最关键的一步。
+            - 计算题：按上文通用规则与示例执行。
+            - 证明题：逻辑链完整不跳步，步骤至少 4 条；每个 step-card 都配 derivation-popup 展示该步依据。
+            - 应用题：前两步通常是设参/建模，步骤 4-8 条；generalMethod 侧重建模通法而非纯计算技巧。""";
 
     /**
      * GEN-P1 题干片工位：题干 JSON → content.json 的 problem 段（{"lines":[...]}）。
