@@ -110,7 +110,7 @@ class GlmClientTest {
     }
 
     @Test
-    @DisplayName("chat：请求体形状 model/messages(system,user)/temperature=0.2/max_tokens=8192")
+    @DisplayName("chat：请求体形状 model/messages(system,user)/temperature=0.2/max_tokens=32768（默认）")
     void chat_requestBody_shape() throws Exception {
         FakeTransport transport = (FakeTransport) new FakeTransport()
                 .enqueue(response(200, okBody("ok")));
@@ -119,7 +119,7 @@ class GlmClientTest {
         JsonNode body = JSON.readTree(transport.bodies.get(0));
         assertThat(body.path("model").asText()).isEqualTo("glm-5.3-flash");
         assertThat(body.path("temperature").asDouble()).isEqualTo(0.2);
-        assertThat(body.path("max_tokens").asInt()).isEqualTo(8192);
+        assertThat(body.path("max_tokens").asInt()).isEqualTo(32768);
         JsonNode messages = body.path("messages");
         assertThat(messages).hasSize(2);
         assertThat(messages.get(0).path("role").asText()).isEqualTo("system");
@@ -274,5 +274,50 @@ class GlmClientTest {
                 .extracting("retryable")
                 .isEqualTo(false);
         assertThat(transport.requests).isEmpty();
+    }
+
+    @Test
+    @DisplayName("max_tokens 可配：app.glm.max-tokens 设 12345 → 请求体同值")
+    void maxTokens_configurable() throws Exception {
+        AppProperties props = new AppProperties();
+        props.getGlm().setMaxTokens(12345);
+        FakeTransport transport = (FakeTransport) new FakeTransport()
+                .enqueue(response(200, okBody("ok")));
+        new GlmClient(transport, secrets(), props, 1).chat("s", "u");
+
+        assertThat(JSON.readTree(transport.bodies.get(0)).path("max_tokens").asInt()).isEqualTo(12345);
+    }
+
+    @Test
+    @DisplayName("finish_reason=length（撞 max_tokens 截断）→ 视为瞬态并归因，重试成功")
+    void truncatedByLength_isTransientWithAttribution() {
+        // finish_reason 在 choice 层级（message 的兄弟键，OpenAI 兼容形状）
+        String truncated = "{\"choices\":[{\"message\":{\"content\":\"{\\\"material\\\":\"},"
+                + "\"finish_reason\":\"length\"}]}";
+        FakeTransport transport = (FakeTransport) new FakeTransport()
+                .enqueue(response(200, truncated))
+                .enqueue(response(200, okBody("重试后完整")));
+
+        assertThat(client(transport).chat("s", "u")).isEqualTo("重试后完整");
+        assertThat(transport.requests).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("连续 3 次 finish_reason=length → 耗尽抛 retryable=true，消息含截断归因")
+    void truncatedByLength_exhaustsRetries_attributed() {
+        String truncated = "{\"choices\":[{\"message\":{\"content\":\"部分正文\"},"
+                + "\"finish_reason\":\"length\"}]}";
+        FakeTransport transport = (FakeTransport) new FakeTransport()
+                .enqueue(response(200, truncated))
+                .enqueue(response(200, truncated))
+                .enqueue(response(200, truncated));
+
+        assertThatThrownBy(() -> client(transport).chat("s", "u"))
+                .isInstanceOf(GlmException.class)
+                .hasMessageContaining("max_tokens")
+                .hasMessageContaining("finish_reason=length")
+                .extracting("retryable")
+                .isEqualTo(true);
+        assertThat(transport.requests).hasSize(3);
     }
 }

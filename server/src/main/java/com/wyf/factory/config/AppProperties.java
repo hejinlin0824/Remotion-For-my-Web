@@ -42,7 +42,13 @@ public class AppProperties {
         private String baseUrl = "https://open.bigmodel.cn/api/paas/v4";
         private String model = "glm-5.3-flash";
         private int concurrency = 2;
-        private int timeoutSeconds = 120;
+        /** 单请求超时（秒）：健康长生成 ~62s，深夜降级窗口 120s 偏紧（08-30/08-31 两夜实证），放宽到 300 */
+        private int timeoutSeconds = 300;
+        /**
+         * max_tokens 上限：thinking 始终开启且与正文共享此预算（官方文档），
+         * GLM-5.3 最大输出 128K；默认 32K ≈ 观测峰值（~10K）3 倍余量，又约束失控长跑的时延。
+         */
+        private int maxTokens = 32768;
 
         public String getBaseUrl() { return baseUrl; }
         public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
@@ -52,6 +58,8 @@ public class AppProperties {
         public void setConcurrency(int concurrency) { this.concurrency = concurrency; }
         public int getTimeoutSeconds() { return timeoutSeconds; }
         public void setTimeoutSeconds(int timeoutSeconds) { this.timeoutSeconds = timeoutSeconds; }
+        public int getMaxTokens() { return maxTokens; }
+        public void setMaxTokens(int maxTokens) { this.maxTokens = maxTokens; }
     }
 
     /** DashScope TTS 资源配置 */

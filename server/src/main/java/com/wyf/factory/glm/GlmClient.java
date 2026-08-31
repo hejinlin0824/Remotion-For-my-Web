@@ -22,7 +22,10 @@ import java.nio.charset.StandardCharsets;
  * model=glm-5.3-flash；Authorization: Bearer 认证；429/5xx 退避重试；
  * 200 但正文为空（thinking 吃满 token 预算）≠ 正常结果，视为瞬态重试。</p>
  *
- * <p>重试：429/5xx/IO/超时/空响应 → 指数退避（基数 2s），共 3 次尝试；
+ * <p>finish_reason=length（thinking 与正文共享 max_tokens 预算，撞顶即截断）≠ 正常结果：
+ * 正文开头可能看似完好但 JSON 断在半截，下游只能误报"不是 JSON"——按瞬态重试并单独归因。</p>
+ *
+ * <p>重试：429/5xx/IO/超时/空响应/截断 → 指数退避（基数 2s），共 3 次尝试；
  * 4xx（除 429）→ 不重试直接抛 retryable=false。</p>
  *
  * <p>key 零泄漏：不打任何请求头/密钥日志；异常消息只含状态码与响应体片段。</p>
@@ -33,7 +36,6 @@ public class GlmClient {
     /** 总尝试次数（含第一次）：3 次全败抛 retryable=true */
     static final int MAX_ATTEMPTS = 3;
     private static final double TEMPERATURE = 0.2;
-    private static final int MAX_TOKENS = 8192;
     /** 非 2xx 响应体进异常消息的截断长度 */
     private static final int ERROR_BODY_SNIPPET = 500;
     /** 生产退避基数（毫秒）：重试间隔 2s / 4s */
@@ -92,19 +94,25 @@ public class GlmClient {
                 HttpResponse<byte[]> response = transport.send(request, body);
                 int status = response.statusCode();
                 if (status >= 200 && status < 300) {
-                    String content;
+                    GlmReply reply;
                     try {
-                        content = parseContent(response.body());
+                        reply = parseReply(response.body());
                     } catch (IOException parseError) {
                         lastTransient = new GlmException("GLM 响应 JSON 解析失败（视为瞬态）", true, parseError);
                         continue;
                     }
-                    if (content == null || content.isBlank()) {
+                    if ("length".equals(reply.finishReason)) {
+                        // 撞 max_tokens 上限：正文断在半截（thinking 共享预算），按瞬态重试并归因
+                        lastTransient = new GlmException(
+                                "GLM 输出被 max_tokens 截断（finish_reason=length，视为瞬态）", true);
+                        continue;
+                    }
+                    if (reply.content == null || reply.content.isBlank()) {
                         // qa_glm.py：200 空正文（thinking 吃满预算）≠ 视觉缺陷/正常结果，按瞬态重试
                         lastTransient = new GlmException("GLM 响应 200 但正文为空（视为瞬态）", true);
                         continue;
                     }
-                    return content;
+                    return reply.content;
                 }
                 String snippet = truncate(new String(response.body(), StandardCharsets.UTF_8));
                 GlmException failure = new GlmException(
@@ -130,7 +138,7 @@ public class GlmClient {
         messages.addObject().put("role", "system").put("content", systemPrompt);
         messages.addObject().put("role", "user").set("content", userContent);
         root.put("temperature", TEMPERATURE);
-        root.put("max_tokens", MAX_TOKENS);
+        root.put("max_tokens", props.getGlm().getMaxTokens());
         try {
             return mapper.writeValueAsBytes(root);
         } catch (IOException e) {
@@ -138,10 +146,18 @@ public class GlmClient {
         }
     }
 
-    /** choices[0].message.content（Jackson 读树）；结构缺失返回 null。 */
-    private String parseContent(byte[] body) throws IOException {
-        JsonNode content = mapper.readTree(body).path("choices").path(0).path("message").path("content");
-        return content.isMissingNode() || content.isNull() ? null : content.asText();
+    /** choices[0] 的 content 与 finish_reason（Jackson 读树）；content 结构缺失返回 null，finish_reason 缺省空串。 */
+    private GlmReply parseReply(byte[] body) throws IOException {
+        JsonNode choice = mapper.readTree(body).path("choices").path(0);
+        JsonNode content = choice.path("message").path("content");
+        String text = content.isMissingNode() || content.isNull() ? null : content.asText();
+        JsonNode finishReason = choice.path("finish_reason");
+        String reason = finishReason.isMissingNode() || finishReason.isNull() ? "" : finishReason.asText();
+        return new GlmReply(text, reason);
+    }
+
+    /** 单次回复解析结果：正文 + 结束原因（"stop"/"length"/…，缺失为空串）。 */
+    private record GlmReply(String content, String finishReason) {
     }
 
     /** 第 attempt 次（attempt≥2）之前的退避：2s / 4s（指数）。 */

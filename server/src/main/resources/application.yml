@@ -20,7 +20,8 @@ app:
     base-url: https://open.bigmodel.cn/api/paas/v4
     model: glm-5.3-flash             # 占位实现层参数，模型名以 Secrets/prompts 层配置为准
     concurrency: 2
-    timeout-seconds: 120
+    timeout-seconds: 300             # 健康长生成 ~62s；深夜降级窗口 120s 偏紧（两夜实证），放宽到 300
+    max-tokens: 32768                # GLM-5.3 最大输出 128K；thinking 与正文共享预算，8192 时代曾被截断误判"不是 JSON"
   tts:
     interval-ms: 3000
     cooldown-ms: 15000
