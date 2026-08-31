@@ -80,6 +80,23 @@ class V1BudgetTest {
                 "V1/题干宽: problem.lines[0] 估宽 2208px 超出题干面板预算（缩放 0.576 低于下限 0.6，渲染必溢出）");
     }
 
+    @Test
+    @DisplayName("R-宽度①边界：W 恰 2121px（text 27 CJK+18 空格 + math 10 码点）→ 缩放 0.5997<0.6 违规")
+    void problemLine_exactly2121_violates() throws Exception {
+        // 纯 text 段不可达 2121（500a+275b ≡ 0 mod 25，21210 ≡ 10），混 math 段可构造：
+        // 27×500 + 18×275 + 10×276 = 21210 tenths = 2121.0px，scale = 1272/2121 ≈ 0.5997 < 0.6。
+        // 注：scale 显示走 %.3f → 「0.600」（0.5997 四舍五入），消息格式与既有违规用例同口径。
+        var bad = mutate(root -> {
+            replaceLineSegments(root, 0, "text", "识".repeat(27) + " ".repeat(18));
+            var mathSeg = MAPPER.createObjectNode();
+            mathSeg.put("type", "math").put("value", "f".repeat(10));
+            ((ArrayNode) root.get("problem").get("lines").get(0).get("segments")).add(mathSeg);
+        });
+
+        assertThat(errorsOf(bad)).contains(
+                "V1/题干宽: problem.lines[0] 估宽 2121px 超出题干面板预算（缩放 0.600 低于下限 0.6，渲染必溢出）");
+    }
+
     // ---- R-宽度② 列表高度 ----
 
     @Test

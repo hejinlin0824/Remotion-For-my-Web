@@ -21,7 +21,7 @@ import java.util.Map;
  * <ul>
  *   <li>R-宽度① 题干行宽：ProblemPanel 行级自适应，缩放 &lt; 0.6 → 违规</li>
  *   <li>R-宽度② 列表高度：GeneralList / ChecklistCard 高度自适应，缩放 &lt; 0.55 → 违规</li>
- *   <li>R-字符① prompt 字数硬约束的确定性执行（散见于 Prompts.java:122-125 的散文 → 机器检查）</li>
+ *   <li>R-字符① prompt 字数硬约束的确定性执行（散见于 stations/Prompts.java:123-125 的散文 → 机器检查）</li>
  * </ul>
  *
  * <p><b>估宽算法逐字镜像</b> template/src/engine/fit.ts：isCJK 码点区间
@@ -283,7 +283,7 @@ public final class V1Budget {
 
     // ---------------------------------------------------------------- R-字符① 字数硬约束
 
-    /** R-字符①（Prompts.java:122-125 散文约束镜像）：generalMethod step≤24/trick≤40；
+    /** R-字符①（stations/Prompts.java:123-125 散文约束镜像）：generalMethod step≤24/trick≤40；
      *  pitfalls claim≤20/why≤40；结论卡（steps 末条 derivation）≤40 + 禁长分式
      *  （\frac 分子或分母 &gt;4 码点）。消息含对应令牌（→P2）。 */
     private static void checkCharacterLimits(ContentJson content, List<String> errors) {
