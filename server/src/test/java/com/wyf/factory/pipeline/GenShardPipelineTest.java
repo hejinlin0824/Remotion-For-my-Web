@@ -202,6 +202,17 @@ class GenShardPipelineTest {
     }
 
     @Test
+    @DisplayName("路由映射表：V1/popup紧跟（计划级相邻性错，带计划内场景 id）→ 全片重做（场景相邻性由骨架计划决定，场景片改不动，T18 评审 M-1）")
+    void routeTable_planLevelPopupAdjacency_redoAll() {
+        GenShardPipeline.RoutePlan plan = pipeline.routeErrors(
+                List.of("V1/popup紧跟: s03 derivation-popup 未紧跟同 stepRef 的 step-card"), SMALL);
+        assertThat(plan.redoAll()).as("计划级相邻性错误不得路由给改不动它的场景片").isTrue();
+        assertThat(plan.summary()).isEqualTo("全部");
+        assertThat(plan.errorsFor(GenShardPipeline.P0)).containsExactly(
+                "V1/popup紧跟: s03 derivation-popup 未紧跟同 stepRef 的 step-card");
+    }
+
+    @Test
     @DisplayName("路由映射表：结论卡错误 = 场景片 + P2（结论内容是 steps 末条 derivation，P2 字段）")
     void routeTable_conclusionCard_p2PlusSceneShard() {
         GenShardPipeline.RoutePlan plan = pipeline.routeErrors(List.of("FAIL s04 帧 40 结论卡公式等号后折行"), SMALL);

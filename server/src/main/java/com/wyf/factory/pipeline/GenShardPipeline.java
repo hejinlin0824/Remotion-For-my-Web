@@ -238,6 +238,12 @@ public class GenShardPipeline {
 
     /** 单条错误 → 目标分片列表；null = 解析不出归属（全片重做）。 */
     private static List<String> targetsOf(String error, Skeleton skeleton, List<SceneShard> shards) {
+        // ⓪ 计划级错误（T18 评审 M-1）：场景相邻性由骨架计划决定，场景片在计划绑定下改不动，
+        //   路由给它只会烧轮 → 返回 null 走全片重做（P0 重排计划，invalidateDownstream 作废旧稿）。
+        //   仅 popupFormula（缺 formula）属场景片可修的场景内容错，不走此分支。
+        if (error.contains("popup紧跟")) {
+            return null;
+        }
         // ① 场景 id（s01）：null 哨兵 = 计划外场景 id → 全片；非空 = 对应场景片
         List<String> sceneTargets = sceneIdTargets(error, skeleton, shards);
         if (sceneTargets == null) {
