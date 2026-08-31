@@ -249,6 +249,18 @@ class JobRepositoryTest {
         assertThat(loaded.getGenDeadlineAt()).isEqualTo(job.getGenDeadlineAt());
     }
 
+    @Test
+    @DisplayName("T21：processingDeadlineAt 列持久往返（全局墙钟重启读回/sweep 判死的落库前提）")
+    void processingDeadlineAt_roundtripsThroughDb() {
+        Job job = newJob("TEXT");
+        job.setProcessingDeadlineAt(LocalDateTime.now().truncatedTo(ChronoUnit.MICROS).plusMinutes(60));
+        em.persistAndFlush(job);
+        em.clear();
+
+        Job loaded = em.find(Job.class, job.getId());
+        assertThat(loaded.getProcessingDeadlineAt()).isEqualTo(job.getProcessingDeadlineAt());
+    }
+
     private static boolean hasOptimisticLockConflict(Throwable t) {
         for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof OptimisticLockException || c instanceof StaleObjectStateException) {

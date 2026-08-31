@@ -97,6 +97,18 @@ public class Job {
      */
     private LocalDateTime genDeadlineAt;
 
+    /**
+     * 全局处理墙钟死线（T21）：首次进入 EXTRACTING 落库 now + 配置值（app.retry.wall-clock-deadline-minutes，
+     * 默认 60min），此后<b>永不刷新</b>——与 {@link #genDeadlineAt} 的「重进刷新」刻意相反：
+     * 全局死线的意义就是掐断磨蹭，V/QA 判负回环不重置时钟。QUEUED 排队等待不计时
+     * （排队延迟是容量问题，不是单题超时——批量公平性）；死线在库里 → 重启持久，
+     * sweep 续跑读回仍生效（停机期间过线的任务由 sweep 判死）。超线处置：非终态 +
+     * now > 死线 → 终态 FAILED（lastError=「全局墙钟超限（&gt;Nmin），本题作废」）。
+     * 诚实边界：单个长调用（如渲染）进行中超线，要等该调用结束到达转换点才判死
+     * ——渲染子进程自有 30min spawn 硬界兜底。NULL=未进过 EXTRACTING 或升级窗口旧行，不计时。
+     */
+    private LocalDateTime processingDeadlineAt;
+
     /** 终态原因（FAILED/CANCELLED 时写入） */
     @Lob
     private String errorMessage;
@@ -194,6 +206,8 @@ public class Job {
     public void setLastError(String lastError) { this.lastError = lastError; }
     public LocalDateTime getGenDeadlineAt() { return genDeadlineAt; }
     public void setGenDeadlineAt(LocalDateTime genDeadlineAt) { this.genDeadlineAt = genDeadlineAt; }
+    public LocalDateTime getProcessingDeadlineAt() { return processingDeadlineAt; }
+    public void setProcessingDeadlineAt(LocalDateTime processingDeadlineAt) { this.processingDeadlineAt = processingDeadlineAt; }
     public String getErrorMessage() { return errorMessage; }
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
     public String getArtifactsDir() { return artifactsDir; }

@@ -92,11 +92,19 @@ public class AppProperties {
         private int contentMax = 3;
         /** GENERATING 墙钟死线（分钟，T15b②）：进 GENERATING 落库 now+值，重试撞线直接判死 */
         private long genDeadlineMinutes = 30;
+        /**
+         * 全局处理墙钟（分钟，T21）：超线即 FAILED 作废，QUEUED 不计时，回环不刷新。
+         * 首次进入 EXTRACTING 落库 now+值，此后绝对死线——健康路径 ~30min 一遍过，
+         * 磨到 60min+ 的版本不可要，与既有 per-stage 上限叠加为全局兜底。
+         */
+        private long wallClockDeadlineMinutes = 60;
 
         public int getContentMax() { return contentMax; }
         public void setContentMax(int contentMax) { this.contentMax = contentMax; }
         public long getGenDeadlineMinutes() { return genDeadlineMinutes; }
         public void setGenDeadlineMinutes(long genDeadlineMinutes) { this.genDeadlineMinutes = genDeadlineMinutes; }
+        public long getWallClockDeadlineMinutes() { return wallClockDeadlineMinutes; }
+        public void setWallClockDeadlineMinutes(long wallClockDeadlineMinutes) { this.wallClockDeadlineMinutes = wallClockDeadlineMinutes; }
     }
 
     public String getTemplateDir() { return templateDir; }

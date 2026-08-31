@@ -31,3 +31,4 @@ app:
   retry:
     content-max: 3
     gen-deadline-minutes: 30   # T15b②：GENERATING 墙钟死线（进阶段落库 now+值，重试撞线直接判死）
+    wall-clock-deadline-minutes: 60   # T21：全局处理墙钟死线（首次进 EXTRACTING 落库 now+值；超线即 FAILED 作废，QUEUED 不计时，回环不刷新）

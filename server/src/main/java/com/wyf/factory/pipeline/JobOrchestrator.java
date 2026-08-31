@@ -67,6 +67,10 @@ import java.util.function.IntConsumer;
  *       ExtractResult 不可恢复时 V2 以 content.json problem 段为基准（历史 note 记录）。</li>
  *   <li><b>取消</b>：每阶段开始前重读最新 Job 查 cancelRequested；SPEAKING 前可取消
  *       （enterStage CANCELLED + workspace 清理 + 不产 artifacts + 回调）；渲染中不打断（spec §11）。</li>
+ *   <li><b>全局墙钟死线</b>（T21）：首次进入 EXTRACTING 落库 processingDeadlineAt = now + 配置值
+ *       （默认 60min），绝对死线——此后 QUEUED 不计时、驳回回环不刷新（与 genDeadlineAt 的重进刷新
+ *       刻意相反）、重启读回仍生效；检查点两处：主循环头部（每次阶段进入/转换）+ {@link #wallClockSweep()}
+ *       周期兜底，非终态过线即 FAILED 作废（「全局墙钟超限（&gt;Nmin），本题作废」）。</li>
  *   <li><b>TOCTOU 兜底</b>（T3 评审 M 项）：任何 save 撞乐观锁（如 cancel 并发落库）→ 重读一次
  *       以库内最新状态继续循环，绝不向上抛 500。</li>
  *   <li><b>失败分类</b>（spec §14）：校验驳回 / QA 判负（Ruling-17：带 FAIL 清单回 GENERATING
@@ -184,6 +188,8 @@ public class JobOrchestrator {
         }
         Job job = next.get();
         try {
+            // T21：首次进入 EXTRACTING 落全局墙钟死线（只落一次；从领单 now 起算——QUEUED 排队等待不计时）
+            plantWallClockDeadlineIfAbsent(job);
             job.enterStage(JobStatus.EXTRACTING, "领单：开始处理");
             repo.save(job);
         } catch (ObjectOptimisticLockingFailureException raced) {
@@ -191,6 +197,34 @@ public class JobOrchestrator {
         }
         log.info("job={} 领单成功 → EXTRACTING", job.getId());
         submit(job.getId());
+    }
+
+    /**
+     * 全局墙钟 sweep（T21② 周期兜底，与 {@link #resumeInterrupted} 同款取任务面）：
+     * 周期扫非终态任务，凡过 processingDeadlineAt 者重新提交推进——主循环头部的墙钟检查点
+     * （T21①）读到过线即 failJob 判死（QUEUED 不计时、回环不刷新、重启读回仍生效；
+     * 停机期间过线的任务由此判死）。不与 {@link #resumeInterrupted} 合并：启动 sweep 一次性的，
+     * 本 sweep 常驻兜底单长调用卡死/落库竞争等主循环无法自达的窗口。
+     * 不在调度线程内直接落库/发回调（回调退避最长数十秒会阻塞共享调度线程，I3 同款纪律），
+     * 交 jobExecutor 工作线程执行；提交面与既有 sweep 同一异常防护（逐任务 try、撞锁静默）。
+     */
+    @Scheduled(fixedDelay = POLL_FIXED_DELAY_MILLIS)
+    public void wallClockSweep() {
+        List<Job> unfinished = repo.findByStatusNotIn(
+                List.of(JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELLED));
+        for (Job job : unfinished) {
+            if (!pastWallClockDeadline(job)) {
+                continue;
+            }
+            log.warn("job={} 全局墙钟 sweep 兜底：已过死线 {}（status={}），提交判死",
+                    job.getId(), job.getProcessingDeadlineAt(), job.getStatus());
+            try {
+                submit(job.getId());
+            } catch (RuntimeException e) {
+                log.warn("job={} 全局墙钟 sweep 提交判死失败（单任务异常不拖垮整轮 sweep，下轮重试）：{}",
+                        job.getId(), e.getMessage());
+            }
+        }
     }
 
     /**
@@ -285,8 +319,18 @@ public class JobOrchestrator {
                 }
                 continue;
             }
+            // 全局墙钟死线检查点（T21①，每次阶段进入/转换处）：非终态过线即 FAILED 作废。
+            // 在取消检查点之后——清理路径发现取消置位 → CANCELLED 优先（裁定 5 竞争语义）。
+            // 绝对死线：QUEUED 不计时（死线自首次 EXTRACTING 起算）、驳回回环不刷新、重启读回仍生效。
+            // 诚实边界：单个长调用（如渲染 15min）进行中超线，要等该调用结束到达本转换点才判死——
+            // 渲染子进程自有 30min spawn 硬界兜底；sweep（wallClockSweep）周期兜底其余窗口。
+            if (pastWallClockDeadline(job)) {
+                failJob(job, wallClockExceededMessage(), null, ctx);
+                fireCallback(ctx);
+                return;
+            }
             switch (job.getStatus()) {
-                case QUEUED -> job = enterAndSave(job, JobStatus.EXTRACTING, "编排器接管（未经 poll 领单），开始审题");
+                case QUEUED -> job = enterExtracting(job, "编排器接管（未经 poll 领单），开始审题");
                 case EXTRACTING -> job = doExtracting(job, ctx);
                 case GENERATING -> job = doGenerating(job, ctx);
                 case REVIEWING -> job = doReviewing(job, ctx);
@@ -327,6 +371,43 @@ public class JobOrchestrator {
         } catch (GlmException e) {
             return retryOrFail(job, e, "审题", job.getExtractRetries(), job::setExtractRetries, ctx);
         }
+    }
+
+    // ------------------------------------------------------------------ 全局墙钟死线（T21）
+
+    /**
+     * （首次）进入 EXTRACTING：落库全局墙钟死线 processingDeadlineAt = now + 配置值（默认 60min）。
+     * 只落一次（null 才落）——绝对死线，断点续跑/回环重进不得刷新（与 {@link #enterGenerating} 的
+     * 每进必刷刻意相反）；QUEUED 排队等待不计时（自领单 now 起算，非 createdAt）。
+     */
+    private Job enterExtracting(Job job, String note) {
+        plantWallClockDeadlineIfAbsent(job);
+        return enterAndSave(job, JobStatus.EXTRACTING, note);
+    }
+
+    /** 全局死线只落一次：null 才落（升级窗口旧行/断点续跑读回原值不动）。 */
+    private void plantWallClockDeadlineIfAbsent(Job job) {
+        if (job.getProcessingDeadlineAt() == null) {
+            job.setProcessingDeadlineAt(
+                    LocalDateTime.now().plusMinutes(props.getRetry().getWallClockDeadlineMinutes()));
+        }
+    }
+
+    /**
+     * 全局墙钟过线判定（检查点共用）：非终态且死线已落库且 now &gt; 死线。QUEUED 恒否
+     * （裁定 2：排队延迟是容量问题，不计时——防御性显式排除，即使升级窗口旧行残留死线值）。
+     */
+    private boolean pastWallClockDeadline(Job job) {
+        if (job.getStatus() == JobStatus.QUEUED || job.getStatus().isTerminal()) {
+            return false;
+        }
+        LocalDateTime deadline = job.getProcessingDeadlineAt();
+        return deadline != null && LocalDateTime.now().isAfter(deadline);
+    }
+
+    /** 超线判死文案（裁定 5 逐字口径，编排器检查点与 sweep 判死共用同一入口 failJob）。 */
+    private String wallClockExceededMessage() {
+        return "全局墙钟超限（>" + props.getRetry().getWallClockDeadlineMinutes() + "min），本题作废";
     }
 
     // ------------------------------------------------------------------ 阶段：GENERATING
@@ -583,7 +664,14 @@ public class JobOrchestrator {
         // 绝对路径落库：JobService.videoPath 直接 Path.of(artifactsDir, "final.mp4") 读文件
         job.setArtifactsDir(artifacts.toAbsolutePath().normalize().toString());
         job.enterStage(JobStatus.DONE, note);
-        saveTolerant(job);
+        Job saved = saveTolerant(job);
+        if (saved == null || saved.getStatus() != JobStatus.DONE) {
+            // DONE 落库被并发终态写入顶掉（T21 前不存在此竞争；全局墙钟 sweep 是首个并发判死方）：
+            // 以库内终局为准——不发 DONE 回调、不清理，循环按库内状态收束（doCancel TOCTOU 同款语义）
+            log.warn("job={} DONE 落库被并发写入顶掉（库内 status={}），以库内终局为准", job.getId(),
+                    saved == null ? "行缺失" : saved.getStatus());
+            return saved;
+        }
         cleanupWorkspaceQuietly(job.getId());
         deferCallback(job, JobStatus.DONE, null, ctx);   // I3：闸外发（loop 层）
         return null;

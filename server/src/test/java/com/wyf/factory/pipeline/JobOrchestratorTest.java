@@ -1090,4 +1090,135 @@ class JobOrchestratorTest {
         verify(extractStation).extract(job.getInputText());   // 重新审题恢复 ExtractResult
         verify(genPipeline).generate(any(), eq(List.of("V1/x: 首轮驳回差异")), any());
     }
+
+    // ---- 22. T21：全局 job 墙钟死线（processingDeadlineAt——绝对死线：QUEUED 不计时/回环不刷新/重启持久） ----
+
+    @Test
+    @DisplayName("T21：poll 领单首次进 EXTRACTING 落库全局死线——自领单 now 起算≈默认 60min，QUEUED 排队等待不计入")
+    void poll_firstExtracting_plantsWallClockDeadline_queuedWaitNotCounted() {
+        Job job = queuedJob();
+        job.setCreatedAt(LocalDateTime.now().minusMinutes(10));   // 排队已等 10min（批量积压场景）
+        when(repo.findFirstByStatusOrderByCreatedAtAsc(JobStatus.QUEUED)).thenReturn(Optional.of(job));
+        when(repo.save(any())).thenAnswer(returnsFirstArg());
+        List<Runnable> submitted = new ArrayList<>();
+        orchestrator.setJobExecutor(submitted::add);
+
+        orchestrator.poll();
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.EXTRACTING);
+        assertThat(job.getProcessingDeadlineAt()).isNotNull();
+        // 默认 60min 绑定（照 genDeadlineMinutes 窗口断言样式）：自领单 now 起算——若从 createdAt 起算只剩 50min，即判 QUEUED 被计时
+        assertThat(job.getProcessingDeadlineAt()).isAfter(LocalDateTime.now().plusMinutes(58));
+        assertThat(job.getProcessingDeadlineAt()).isBefore(LocalDateTime.now().plusMinutes(61));
+        assertThat(submitted).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("T21：app.retry.wall-clock-deadline-minutes 默认绑定 60（超线即 FAILED 作废的配置基线）")
+    void wallClockDeadlineMinutes_defaultIsSixty() {
+        assertThat(new AppProperties().getRetry().getWallClockDeadlineMinutes()).isEqualTo(60);
+    }
+
+    @Test
+    @DisplayName("T21：超线在主循环检查点判 FAILED——lastError 逐字「全局墙钟超限（>60min），本题作废」，零阶段工位执行，回调 FAILED")
+    void wallClockExceeded_loopCheckpoint_failsWithVerbatimLastError() throws Exception {
+        Job job = claimedJob();
+        job.setProcessingDeadlineAt(LocalDateTime.now().minusMinutes(1));   // 库里读回的过期死线（如停机期间过线）
+        stubRepo(job);
+        stubStationsOk();
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
+        assertThat(job.getLastError()).isEqualTo("全局墙钟超限（>60min），本题作废");
+        assertThat(job.getErrorMessage()).isEqualTo("全局墙钟超限（>60min），本题作废");
+        verify(extractStation, never()).extract(anyString());   // 检查点在阶段执行前，工位零调用
+        verify(genPipeline, never()).generate(any(), anyList(), any());
+        verify(ttsPipeline, never()).synthesizeAll(any(), any());
+        ArgumentCaptor<CallbackClient.CallbackPayload> payload = ArgumentCaptor.forClass(CallbackClient.CallbackPayload.class);
+        verify(callbackClient).notify(eq(CALLBACK_URL), payload.capture());
+        assertThat(payload.getValue().status()).isEqualTo("FAILED");
+        assertThat(payload.getValue().error()).isEqualTo("全局墙钟超限（>60min），本题作废");
+    }
+
+    @Test
+    @DisplayName("T21：驳回回环重进 GENERATING——genDeadlineAt 照旧刷新，全局死线【不】刷新（语义刻意相反，双断言并存）")
+    void rejectionLoop_refreshesGenDeadline_butNotWallClockDeadline() throws Exception {
+        Job job = claimedJob();
+        LocalDateTime planted = LocalDateTime.now().plusMinutes(55);   // 首次 EXTRACTING 落下的库内值
+        job.setProcessingDeadlineAt(planted);
+        stubRepo(job);
+        stubStationsOk();
+        when(v4.validate(any()))
+                .thenAnswer(inv -> {
+                    job.setGenDeadlineAt(LocalDateTime.now().minusHours(1));   // 上一轮残留旧 gen 死线
+                    return ValidationResult.fail(List.of("V1/x: 驳回一次"));
+                })
+                .thenReturn(ValidationResult.ok());
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        assertThat(historyStages(job)).containsSubsequence(
+                "GENERATING", "REVIEWING", "GENERATING", "REVIEWING");
+        // 双断言：gen 死线重进刷新（T15b 语义不变）；全局死线原值不动（T21 裁定：回环不刷新）
+        assertThat(job.getGenDeadlineAt()).isAfter(LocalDateTime.now().plusMinutes(29));
+        assertThat(job.getProcessingDeadlineAt()).isEqualTo(planted);
+    }
+
+    @Test
+    @DisplayName("T21：重启读回（sweep 周期兜底）——库里过期死线的非终态任务被 sweep 提交并在检查点判死，lastError 逐字 + 回调 FAILED")
+    void wallClockSweep_killsOverdueJob_readBackFromDb() throws Exception {
+        Job job = claimedJobAt(JobStatus.SPEAKING);
+        job.setProcessingDeadlineAt(LocalDateTime.now().minusMinutes(1));   // 停机期间过线，重启后 sweep 读回
+        stubRepo(job);
+        orchestrator.setJobExecutor(Runnable::run);   // sweep 提交同步直跑（免真线程）
+        when(repo.findByStatusNotIn(any())).thenReturn(List.of(job));
+
+        orchestrator.wallClockSweep();
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
+        assertThat(job.getLastError()).isEqualTo("全局墙钟超限（>60min），本题作废");
+        verify(ttsPipeline, never()).synthesizeAll(any(), any());   // 判死在检查点，阶段工位零调用
+        ArgumentCaptor<CallbackClient.CallbackPayload> payload = ArgumentCaptor.forClass(CallbackClient.CallbackPayload.class);
+        verify(callbackClient).notify(eq(CALLBACK_URL), payload.capture());
+        assertThat(payload.getValue().status()).isEqualTo("FAILED");
+        assertThat(payload.getValue().error()).isEqualTo("全局墙钟超限（>60min），本题作废");
+    }
+
+    @Test
+    @DisplayName("T21：sweep 只提交过线任务——QUEUED 不计时（即使残留过期死线）与死线内任务均不提交")
+    void wallClockSweep_submitsOnlyOverdueJobs() {
+        List<Runnable> submitted = new ArrayList<>();
+        orchestrator.setJobExecutor(submitted::add);
+        Job overdueQueued = queuedJob();
+        overdueQueued.setProcessingDeadlineAt(LocalDateTime.now().minusMinutes(1));   // 防御：QUEUED 即使残留过期死线也不计时
+        Job withinDeadline = claimedJob();
+        withinDeadline.setProcessingDeadlineAt(LocalDateTime.now().plusMinutes(30));
+        Job overdue = claimedJobAt(JobStatus.GENERATING);
+        overdue.setProcessingDeadlineAt(LocalDateTime.now().minusMinutes(1));
+        when(repo.findByStatusNotIn(any())).thenReturn(List.of(overdueQueued, withinDeadline, overdue));
+
+        orchestrator.wallClockSweep();
+
+        assertThat(submitted).hasSize(1);
+        assertThat(overdueQueued.getStatus()).isEqualTo(JobStatus.QUEUED);   // 未被 sweep 判死
+        assertThat(withinDeadline.getStatus()).isEqualTo(JobStatus.EXTRACTING);
+    }
+
+    @Test
+    @DisplayName("T21：死线内正常全链不受影响（回归）——全局死线全程原值不被改写，DONE 照旧")
+    void withinWallClockDeadline_fullChainUnaffected() throws Exception {
+        Job job = claimedJob();
+        LocalDateTime planted = LocalDateTime.now().plusMinutes(59);
+        job.setProcessingDeadlineAt(planted);
+        stubRepo(job);
+        stubStationsOk();
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        assertThat(job.getProcessingDeadlineAt()).isEqualTo(planted);   // 任何阶段进入/回环都不改写全局死线
+        verify(callbackClient).notify(eq(CALLBACK_URL), any());
+    }
 }
