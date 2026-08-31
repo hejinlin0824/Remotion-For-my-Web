@@ -91,7 +91,7 @@ public class MaterialStation {
         items(root, "pitfalls", PITFALL_FIELDS, problems);
         items(root, "generalMethod", METHOD_FIELDS, problems);
         if (!problems.isEmpty()) {
-            throw new GlmException(String.join("\n", problems), true);
+            throw new GlmException(problems, true);   // T19a：结构化携带清单（message 形状不变）
         }
         try {
             return mapper.treeToValue(root, Material.class);

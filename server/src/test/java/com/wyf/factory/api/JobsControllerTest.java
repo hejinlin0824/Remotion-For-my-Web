@@ -2,11 +2,14 @@ package com.wyf.factory.api;
 
 import com.wyf.factory.api.dto.CreateJobRequest;
 import com.wyf.factory.api.dto.JobView;
+import com.wyf.factory.api.dto.ReviewErrorView;
 import com.wyf.factory.config.AppProperties;
 import com.wyf.factory.domain.Job;
+import com.wyf.factory.domain.JobReviewError;
 import com.wyf.factory.domain.JobStatus;
 import com.wyf.factory.domain.StageHistoryEntry;
 import com.wyf.factory.repo.JobRepository;
+import com.wyf.factory.repo.JobReviewErrorRepository;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -443,6 +446,43 @@ class JobsControllerTest {
                 .andExpect(jsonPath("$.error").value("成片未定版：任务 RENDERING 未达 DONE"));
     }
 
+    // ---------------------------------------------------------------- GET /api/v1/jobs/{id}/review-errors
+
+    @Test
+    @DisplayName("review-errors 有清单 → 200 [{jobId,round,source,reason,createdAt}]（T19a）")
+    void reviewErrors_existing_returnsRows() throws Exception {
+        when(service.reviewErrors("j1")).thenReturn(List.of(
+                new ReviewErrorView("j1", 2, "REVIEW", "V1/x: 折行差异", LocalDateTime.of(2026, 8, 31, 10, 0))));
+
+        mockMvc.perform(get("/api/v1/jobs/j1/review-errors"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].jobId").value("j1"))
+                .andExpect(jsonPath("$[0].round").value(2))
+                .andExpect(jsonPath("$[0].source").value("REVIEW"))
+                .andExpect(jsonPath("$[0].reason").value("V1/x: 折行差异"))
+                .andExpect(jsonPath("$[0].createdAt").value("2026-08-31T10:00:00"));
+    }
+
+    @Test
+    @DisplayName("review-errors 无清单 → 200 空数组（job 存在但从未被驳回）")
+    void reviewErrors_noRows_returnsEmptyArray() throws Exception {
+        when(service.reviewErrors("j1")).thenReturn(List.of());
+
+        mockMvc.perform(get("/api/v1/jobs/j1/review-errors"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isEmpty());
+    }
+
+    @Test
+    @DisplayName("review-errors job 不存在 → 404 {error:'job not found'}")
+    void reviewErrors_missing_returns404() throws Exception {
+        when(service.reviewErrors("nope")).thenThrow(new GlobalExceptionHandler.ApiException(404, "job not found"));
+
+        mockMvc.perform(get("/api/v1/jobs/nope/review-errors"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("job not found"));
+    }
+
     // ---------------------------------------------------------------- 兜底异常
 
     @Test
@@ -475,8 +515,9 @@ class JobsControllerTest {
     class ServiceLogic {
 
         private final JobRepository repo = mock(JobRepository.class);
+        private final JobReviewErrorRepository reviewErrorRepo = mock(JobReviewErrorRepository.class);
         private final AppProperties props = new AppProperties();
-        private final JobService realService = new JobService(repo, props);
+        private final JobService realService = new JobService(repo, reviewErrorRepo, props);
 
         @Test
         @DisplayName("create TEXT：落缺省 aspect=16:9 / voice=Cherry / resolution=1080p，id 为 UUID，artifactsDir 指向产物目录")
@@ -751,6 +792,28 @@ class JobsControllerTest {
                     .isInstanceOf(GlobalExceptionHandler.ApiException.class)
                     .hasMessageContaining("成片未定版")
                     .hasFieldOrPropertyWithValue("status", 404);
+        }
+
+        @Test
+        @DisplayName("reviewErrors（T19a）：行按 id 升序映射视图；job 不存在 → 404 ApiException")
+        void reviewErrors_mapsRows_missingJob404() {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+            when(repo.findById("nope")).thenReturn(java.util.Optional.empty());
+            when(reviewErrorRepo.findByJobIdOrderByIdAsc(job.getId())).thenReturn(List.of(
+                    new JobReviewError(job.getId(), "REVIEW", 1, "V1/x: 差异", LocalDateTime.of(2026, 8, 31, 9, 0)),
+                    new JobReviewError(job.getId(), "QA", 1, "FAIL 折行", LocalDateTime.of(2026, 8, 31, 9, 5))));
+
+            assertThat(realService.reviewErrors(job.getId()))
+                    .extracting(ReviewErrorView::jobId, ReviewErrorView::source, ReviewErrorView::reason)
+                    .containsExactly(
+                            org.assertj.core.groups.Tuple.tuple(job.getId(), "REVIEW", "V1/x: 差异"),
+                            org.assertj.core.groups.Tuple.tuple(job.getId(), "QA", "FAIL 折行"));
+            assertThatThrownBy(() -> realService.reviewErrors("nope"))
+                    .isInstanceOf(GlobalExceptionHandler.ApiException.class)
+                    .hasFieldOrPropertyWithValue("status", 404);
+            verify(reviewErrorRepo, never()).findByJobIdOrderByIdAsc("nope");   // 404 短路，不查子表
         }
     }
 

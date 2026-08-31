@@ -2,10 +2,12 @@ package com.wyf.factory.api;
 
 import com.wyf.factory.api.dto.CreateJobRequest;
 import com.wyf.factory.api.dto.JobView;
+import com.wyf.factory.api.dto.ReviewErrorView;
 import com.wyf.factory.config.AppProperties;
 import com.wyf.factory.domain.Job;
 import com.wyf.factory.domain.JobStatus;
 import com.wyf.factory.repo.JobRepository;
+import com.wyf.factory.repo.JobReviewErrorRepository;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
@@ -28,10 +30,12 @@ public class JobService {
     public enum CancelResult { ACCEPTED, NOT_CANCELLABLE, ALREADY_TERMINAL, NOT_FOUND }
 
     private final JobRepository repo;
+    private final JobReviewErrorRepository reviewErrorRepo;
     private final AppProperties props;
 
-    public JobService(JobRepository repo, AppProperties props) {
+    public JobService(JobRepository repo, JobReviewErrorRepository reviewErrorRepo, AppProperties props) {
         this.repo = repo;
+        this.reviewErrorRepo = reviewErrorRepo;
         this.props = props;
     }
 
@@ -60,6 +64,19 @@ public class JobService {
 
     public Optional<JobView> get(String id) {
         return repo.findById(id).map(JobView::from);
+    }
+
+    /**
+     * 错误清单（T19a）：该 job 全部驳回/判负原因行，按 id 升序（时间序）。
+     * job 不存在 → 404（与 get 对齐）；存在但从未被驳回 → 空列表。
+     */
+    public List<ReviewErrorView> reviewErrors(String id) {
+        if (repo.findById(id).isEmpty()) {
+            throw new GlobalExceptionHandler.ApiException(404, "job not found");
+        }
+        return reviewErrorRepo.findByJobIdOrderByIdAsc(id).stream()
+                .map(ReviewErrorView::from)
+                .toList();
     }
 
     /** 列表：status 为 null 查全部，否则按状态过滤 */

@@ -3,12 +3,14 @@ package com.wyf.factory.pipeline;
 import com.wyf.factory.config.AppProperties;
 import com.wyf.factory.content.ContentJson;
 import com.wyf.factory.domain.Job;
+import com.wyf.factory.domain.JobReviewError;
 import com.wyf.factory.domain.JobStatus;
 import com.wyf.factory.glm.GlmException;
 import com.wyf.factory.render.QaFrameCheck;
 import com.wyf.factory.render.RenderWorker;
 import com.wyf.factory.render.WorkspaceManager;
 import com.wyf.factory.repo.JobRepository;
+import com.wyf.factory.repo.JobReviewErrorRepository;
 import com.wyf.factory.stations.ExtractResult;
 import com.wyf.factory.stations.ExtractStation;
 import com.wyf.factory.stations.Material;
@@ -92,7 +94,14 @@ public class JobOrchestrator {
     /** IMAGE 路径送 GLM 视觉通道的 mime（入队校验仅收 base64，统一按 PNG 提交）。 */
     private static final String IMAGE_MIME = "image/png";
 
+    /** 错误清单落库来源（T19a）：V1-V4 驳回 / QA 审帧判负 / 素材工位轻校验 / 剧本工位轻校验。 */
+    static final String SRC_REVIEW = "REVIEW";
+    static final String SRC_QA = "QA";
+    static final String SRC_MATERIAL = "MATERIAL";
+    static final String SRC_SCRIPT = "SCRIPT";
+
     private final JobRepository repo;
+    private final JobReviewErrorRepository reviewErrorRepo;
     private final ExtractStation extractStation;
     private final MaterialStation materialStation;
     private final ScriptStation scriptStation;
@@ -112,6 +121,7 @@ public class JobOrchestrator {
     private Executor jobExecutor;
 
     public JobOrchestrator(JobRepository repo,
+                           JobReviewErrorRepository reviewErrorRepo,
                            ExtractStation extractStation,
                            MaterialStation materialStation,
                            ScriptStation scriptStation,
@@ -127,6 +137,7 @@ public class JobOrchestrator {
                            CallbackClient callbackClient,
                            AppProperties props) {
         this.repo = repo;
+        this.reviewErrorRepo = reviewErrorRepo;
         this.extractStation = extractStation;
         this.materialStation = materialStation;
         this.scriptStation = scriptStation;
@@ -349,17 +360,68 @@ public class JobOrchestrator {
             // 只有"从盘上恢复"才跳过；上一轮 REVIEWING 驳回生成的 ctx.content 不算（必须重生成）
             return enterAndSave(job, JobStatus.REVIEWING, "断点续跑：content.json 已在盘，跳过素材/剧本生成");
         }
-        List<String> errors = ctx.reviewErrors;
-        try {
-            Material material = semaphores.withGlm(() -> materialStation.generate(ctx.extracted, errors));
-            ContentJson content = semaphores.withGlm(() -> scriptStation.assemble(ctx.extracted, material, errors));
-            ctx.content = content;
-            return enterAndSave(job, JobStatus.REVIEWING, errors.isEmpty()
-                    ? "素材+剧本生成完成"
-                    : "驳回重生成完成（错误清单已回传，共 " + errors.size() + " 条）");
-        } catch (GlmException e) {
-            return retryOrFail(job, e, "内容生成", job.getGenRetries(), job::setGenRetries, ctx);
+        if (ensureExtracted(job, ctx) == null) {
+            return null;   // 生成输入恢复判死/重试路由已落库
         }
+        List<String> errors = ctx.reviewErrors;
+        Material material;
+        try {
+            material = semaphores.withGlm(() -> materialStation.generate(ctx.extracted, errors));
+        } catch (GlmException e) {
+            return generationRetryOrFail(job, e, SRC_MATERIAL, ctx);
+        }
+        ContentJson content;
+        try {
+            content = semaphores.withGlm(() -> scriptStation.assemble(ctx.extracted, material, errors));
+        } catch (GlmException e) {
+            return generationRetryOrFail(job, e, SRC_SCRIPT, ctx);
+        }
+        ctx.content = content;
+        return enterAndSave(job, JobStatus.REVIEWING, errors.isEmpty()
+                ? "素材+剧本生成完成"
+                : "驳回重生成完成（错误清单已回传，共 " + errors.size() + " 条）");
+    }
+
+    /**
+     * 生成输入恢复（T19a 配套，ExtractResult 不落库的断点续跑补偿）：重启续跑进 GENERATING 时
+     * ExtractResult 在内存里已丢——优先从盘上 content.json 的 problem 段零成本重建（同源题干，
+     * 与 doReviewing 续跑同款取法）；盘上无 content.json（首轮生成中断/首轮驳回回环中断）则
+     * 题干在 Job 上，重新审题（异常路由与 doExtracting 同款：FatalExtract 判死、GlmException
+     * 走 extractRetries 预算）。修复前此场景生成载荷是字面 "null" 的盲跑。
+     *
+     * @return job 继续推进；null = 已判死/待重试落库，本阶段停止
+     */
+    private Job ensureExtracted(Job job, Ctx ctx) {
+        if (ctx.extracted != null) {
+            return job;
+        }
+        if (ctx.content != null) {
+            ctx.extracted = extractedFromProblem(ctx.content);
+            return job;
+        }
+        try {
+            ctx.extracted = semaphores.withGlm(() -> "IMAGE".equals(job.getInputType())
+                    ? extractStation.extractImage(imagePayload(job), IMAGE_MIME)
+                    : extractStation.extract(job.getInputText()));
+            return job;
+        } catch (ExtractStation.FatalExtractException fatal) {
+            failJob(job, fatal.getMessage(), fatal, ctx);
+            return null;
+        } catch (GlmException e) {
+            return retryOrFail(job, e, "审题", job.getExtractRetries(), job::setExtractRetries, ctx);
+        }
+    }
+
+    /**
+     * 生成工位失败路由（T19a）：工位级轻校验失败（GlmException 结构化携带 problems）先把差异
+     * 清单落库（source=MATERIAL/SCRIPT，轮次=生成尝试序号 genRetries+1），再走既有 retryOrFail；
+     * 瞬态/致命异常 problems 为 null，不落清单直接 retryOrFail——不从 message 反解，无解析歧义。
+     */
+    private Job generationRetryOrFail(Job job, GlmException e, String source, Ctx ctx) {
+        if (e.getProblems() != null) {
+            persistReviewErrors(job.getId(), source, job.getGenRetries() + 1, e.getProblems());
+        }
+        return retryOrFail(job, e, "内容生成", job.getGenRetries(), job::setGenRetries, ctx);
     }
 
     // ------------------------------------------------------------------ 阶段：REVIEWING
@@ -400,6 +462,7 @@ public class JobOrchestrator {
         if (used < props.getRetry().getContentMax()) {
             job.setReviewRetries(used + 1);
             ctx.reviewErrors = List.copyOf(errors);
+            persistReviewErrors(job.getId(), SRC_REVIEW, used + 1, errors);   // T19a：观测回溯 + 重启读回
             // 修复轮 I1：清除断点续跑标记——下一轮 GENERATING 必须真正重生成，
             // 否则续跑场景下 ctx.content 恒非空会被误判为"已在盘"而永不重生成
             ctx.contentResumed = false;
@@ -655,6 +718,7 @@ public class JobOrchestrator {
                 errors.add("QA 审帧判负（审帧器未给出具体 FAIL 行）");
             }
             ctx.reviewErrors = List.copyOf(errors);
+            persistReviewErrors(job.getId(), SRC_QA, round, errors);   // T19a：观测回溯 + 重启读回
             // 修复轮 I1 同理：清续跑标记——QA 驳回后 GENERATING 必须真正重生成
             ctx.contentResumed = false;
             // 剧本将重生成 → 旧 TTS 音频/台词 wav/工作区（含旧 content.json 与旧 qa 产物）全部作废，
@@ -764,7 +828,13 @@ public class JobOrchestrator {
 
     // ------------------------------------------------------------------ 断点续跑
 
-    /** 扫描 workspace/artifacts 断点产物（content → 跳过审题/生成；audio+wav 齐 → 跳过 TTS）。 */
+    /**
+     * 扫描 workspace/artifacts 断点产物（content → 跳过审题/生成；audio+wav 齐 → 跳过 TTS），
+     * 并做 T19a 读回归：最近一份回传的错误清单从 job_review_errors 读回 ctx.reviewErrors。
+     * 带 pending 清单停在 GENERATING = 驳回回环在重生成前中断——I1「必须真正重生成」标记跨重启
+     * 恢复：清 contentResumed（盘上 content.json 是上一轮旧稿，不作数）、作废旧 TTS 音频/台词 wav
+     * （剧本将重生成，与 qaRetryOrFail 的作废清单同款），否则会退化成「旧稿盲审 + 旧音新稿」。
+     */
     private Ctx loadResume(Job job) {
         Ctx ctx = new Ctx();
         Path contentJson = wsContentJson(job.getId());
@@ -792,7 +862,49 @@ public class JobOrchestrator {
                 log.warn("job={} 断点续跑读 audio_meta.json 失败，回退整段 TTS：{}", job.getId(), e.getMessage());
             }
         }
+        ctx.reviewErrors = latestPersistedErrors(job.getId());
+        if (job.getStatus() == JobStatus.GENERATING && !ctx.reviewErrors.isEmpty()) {
+            log.info("job={} 断点续跑：读回错误清单 {} 条（待修正重生成），盘上旧 content/audio 作废",
+                    job.getId(), ctx.reviewErrors.size());
+            ctx.contentResumed = false;
+            ctx.audioMeta = null;
+            ctx.lineWavs = Map.of();
+        }
         return ctx;
+    }
+
+    /** 最近一次回传的错误清单（T19a 读回归）：以 id 最大行定位 (source, round) 事件，整组按原清单顺序读回。 */
+    private List<String> latestPersistedErrors(String jobId) {
+        Optional<JobReviewError> last = reviewErrorRepo.findTopByJobIdOrderByIdDesc(jobId);
+        if (last.isEmpty()) {
+            return List.of();
+        }
+        JobReviewError anchor = last.get();
+        return reviewErrorRepo.findByJobIdAndSourceAndRoundOrderByIdAsc(jobId, anchor.getSource(), anchor.getRound())
+                .stream()
+                .map(JobReviewError::getReason)
+                .toList();
+    }
+
+    /**
+     * 错误清单落库（T19a）：一行一条原因，best-effort——落库失败仅告警不阻断主流程
+     * （观测数据的故障面不外溢；回传通道 ctx.reviewErrors 不受影响）。
+     */
+    private void persistReviewErrors(String jobId, String source, int round, List<String> errors) {
+        if (errors == null || errors.isEmpty()) {
+            return;
+        }
+        LocalDateTime now = LocalDateTime.now();
+        List<JobReviewError> rows = new ArrayList<>(errors.size());
+        for (String error : errors) {
+            rows.add(new JobReviewError(jobId, source, round, error, now));
+        }
+        try {
+            reviewErrorRepo.saveAll(rows);
+        } catch (RuntimeException e) {
+            log.warn("job={} 错误清单落库失败（source={} round={} size={}，不影响主流程）：{}",
+                    jobId, source, round, rows.size(), e.getMessage());
+        }
     }
 
     /** workspace lines 目录的 wav 全齐才返回 map（断点续跑判定：lines wav 数齐）；否则 null。 */
@@ -901,7 +1013,7 @@ public class JobOrchestrator {
         return stripped.length() <= 120 ? stripped : stripped.substring(0, 120) + "…";
     }
 
-    /** 单任务处理过程中的内存上下文（断点续跑产物 + 跨阶段传递），不落库。 */
+    /** 单任务处理过程中的内存上下文（断点续跑产物 + 跨阶段传递）；reviewErrors 另有子表落库（T19a），此处为进程内回传通道。 */
     static final class Ctx {
         ContentJson content;
         /** content 来自盘上断点续跑（true）还是本轮生成（false）——驳回重生成必须区分。 */
@@ -910,6 +1022,7 @@ public class JobOrchestrator {
         boolean extractedFromResume;
         AudioMeta audioMeta;
         Map<Integer, byte[]> lineWavs = Map.of();
+        /** 本轮回传重生成的错误清单（T19a：每次回传同步落 job_review_errors，重启后 loadResume 读回）。 */
         List<String> reviewErrors = List.of();
         Path workspace;
         Path artifactsDir;

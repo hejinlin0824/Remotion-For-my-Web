@@ -225,7 +225,8 @@ class JobRepositoryTest {
             return repo.save(inv.getArgument(0));
         }).when(racing).save(any(Job.class));
 
-        JobService.CancelResult result = new JobService(racing, new AppProperties()).cancel(jobId);
+        JobService.CancelResult result = new JobService(racing,
+                mock(com.wyf.factory.repo.JobReviewErrorRepository.class), new AppProperties()).cancel(jobId);
 
         assertThat(result).isEqualTo(JobService.CancelResult.ACCEPTED);
         assertThat(rivalBumps).hasValue(1);   // 编排器只并发提交一次：撞锁后重读重试恰一次成功

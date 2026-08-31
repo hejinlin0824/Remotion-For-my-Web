@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wyf.factory.config.AppProperties;
 import com.wyf.factory.content.ContentJson;
 import com.wyf.factory.domain.Job;
+import com.wyf.factory.domain.JobReviewError;
 import com.wyf.factory.domain.JobStatus;
 import com.wyf.factory.domain.StageHistoryEntry;
 import com.wyf.factory.glm.GlmException;
@@ -11,6 +12,7 @@ import com.wyf.factory.render.QaFrameCheck;
 import com.wyf.factory.render.RenderWorker;
 import com.wyf.factory.render.WorkspaceManager;
 import com.wyf.factory.repo.JobRepository;
+import com.wyf.factory.repo.JobReviewErrorRepository;
 import com.wyf.factory.stations.ExtractResult;
 import com.wyf.factory.stations.ExtractStation;
 import com.wyf.factory.stations.Material;
@@ -48,6 +50,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.groups.Tuple.tuple;
 import static org.mockito.AdditionalAnswers.returnsFirstArg;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -79,6 +82,7 @@ class JobOrchestratorTest {
     Path tempDir;
 
     @Mock JobRepository repo;
+    @Mock JobReviewErrorRepository reviewErrorRepo;
     @Mock ExtractStation extractStation;
     @Mock MaterialStation materialStation;
     @Mock ScriptStation scriptStation;
@@ -117,7 +121,7 @@ class JobOrchestratorTest {
         props = new AppProperties();
         props.setWorkspaceDir(tempDir.resolve("workspace").toString());
         props.setArtifactsDir(tempDir.resolve("artifacts").toString());
-        orchestrator = new JobOrchestrator(repo, extractStation, materialStation, scriptStation,
+        orchestrator = new JobOrchestrator(repo, reviewErrorRepo, extractStation, materialStation, scriptStation,
                 v1, v2, v3, v4, ttsPipeline, workspaceManager, renderWorker, qaFrameCheck,
                 new ResourceSemaphores(props), callbackClient, props);
     }
@@ -917,5 +921,170 @@ class JobOrchestratorTest {
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
         verify(renderWorker, times(5)).render(any(Path.class), any());
         assertThat(job.getQaRounds()).isEqualTo(props.getQa().getMaxRounds() - 1);
+    }
+
+    // ---- 19. T19a：reviewErrors 落库（观测回溯 + 重启读回的数据基础） ----
+
+    @Test
+    @DisplayName("T19a：V 驳回清单落库——来源 REVIEW、轮次=驳回轮次（1-based）、一行一条原因（含软预警）")
+    void reviewRejection_persistsErrorListPerRound() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(v4.validate(any()))
+                .thenReturn(ValidationResult.fail(List.of("V1/x: 差异一")))
+                .thenReturn(ValidationResult.fail(List.of("V1/y: 差异二", "V3/z: 软预警")))
+                .thenReturn(ValidationResult.ok());
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<JobReviewError>> saved = ArgumentCaptor.forClass(List.class);
+        verify(reviewErrorRepo, times(2)).saveAll(saved.capture());
+        List<JobReviewError> round1 = saved.getAllValues().get(0);
+        assertThat(round1).extracting(JobReviewError::getJobId, JobReviewError::getSource, JobReviewError::getRound)
+                .containsExactly(tuple(JOB_ID, "REVIEW", 1));
+        assertThat(round1).extracting(JobReviewError::getReason).containsExactly("V1/x: 差异一");
+        List<JobReviewError> round2 = saved.getAllValues().get(1);
+        assertThat(round2).extracting(JobReviewError::getReason).containsExactly("V1/y: 差异二", "V3/z: 软预警");
+        assertThat(round2).extracting(JobReviewError::getRound).containsOnly(2);
+        assertThat(round2).allSatisfy(r -> assertThat(r.getCreatedAt()).isNotNull());
+    }
+
+    @Test
+    @DisplayName("T19a：QA 判负 FAIL 清单落库——来源 QA、轮次=判负轮次，回传什么落什么")
+    void qaRejection_persistsFailListPerRound() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(qaFrameCheck.check(any(Path.class)))
+                .thenReturn(new QaFrameCheck.QaResult(false, List.of("FAIL s03 折行"), 3))
+                .thenReturn(new QaFrameCheck.QaResult(false, List.of("FAIL s05 出缘"), 3))
+                .thenReturn(new QaFrameCheck.QaResult(true, List.of(), 3));
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<JobReviewError>> saved = ArgumentCaptor.forClass(List.class);
+        verify(reviewErrorRepo, times(2)).saveAll(saved.capture());
+        assertThat(saved.getAllValues().get(0))
+                .extracting(JobReviewError::getJobId, JobReviewError::getSource, JobReviewError::getRound,
+                        JobReviewError::getReason)
+                .containsExactly(tuple(JOB_ID, "QA", 1, "FAIL s03 折行"));
+        assertThat(saved.getAllValues().get(1))
+                .extracting(JobReviewError::getReason).containsExactly("FAIL s05 出缘");
+        assertThat(saved.getAllValues().get(1)).extracting(JobReviewError::getRound).containsOnly(2);
+    }
+
+    @Test
+    @DisplayName("T19a：工位轻校验失败清单落库——素材工位 source=MATERIAL（轮次=生成尝试序号）；瞬态异常无清单不落库")
+    void materialValidation_persistsProblems_transientNotPersisted() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(materialStation.generate(any(), anyList()))
+                .thenThrow(new GlmException(List.of("knowledge 缺失或不是非空数组", "steps 条数 2 超出范围 3-10"), true))
+                .thenThrow(new GlmException("GLM 请求 IO/超时失败（视为瞬态）", true))
+                .thenReturn(MATERIAL);
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<JobReviewError>> saved = ArgumentCaptor.forClass(List.class);
+        verify(reviewErrorRepo, times(1)).saveAll(saved.capture());   // 瞬态那次不落
+        assertThat(saved.getAllValues().get(0))
+                .extracting(JobReviewError::getJobId, JobReviewError::getSource, JobReviewError::getRound)
+                .containsOnly(tuple(JOB_ID, "MATERIAL", 1));   // 一行一条原因：2 行同属本事件
+        assertThat(saved.getAllValues().get(0))
+                .extracting(JobReviewError::getReason)
+                .containsExactly("knowledge 缺失或不是非空数组", "steps 条数 2 超出范围 3-10");
+    }
+
+    @Test
+    @DisplayName("T19a：剧本工位轻校验失败清单落库——source=SCRIPT，重试通过后照常推进")
+    void scriptValidation_persistsProblems() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(scriptStation.assemble(any(), any(), anyList()))
+                .thenThrow(new GlmException(List.of("scenes[0] 缺必需字段 ttsText"), true))
+                .thenReturn(JSON.readValue(CONTENT_JSON, ContentJson.class));
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<JobReviewError>> saved = ArgumentCaptor.forClass(List.class);
+        verify(reviewErrorRepo, times(1)).saveAll(saved.capture());
+        assertThat(saved.getAllValues().get(0))
+                .extracting(JobReviewError::getJobId, JobReviewError::getSource, JobReviewError::getRound,
+                        JobReviewError::getReason)
+                .containsExactly(tuple(JOB_ID, "SCRIPT", 1, "scenes[0] 缺必需字段 ttsText"));
+    }
+
+    // ---- 20. T19a 读回归：重启续跑进 GENERATING 时从库读回（消除盲重试降级） ----
+
+    @Test
+    @DisplayName("T19a 读回归：GENERATING 驳回回环中断重启 → 最近清单从库读回注入重生成；盘上旧 content/audio 作废（I1 跨重启），题干从 content.json problem 段零成本恢复")
+    void resumeIntoGenerating_readsBackLatestErrors_andRegenerates() throws Exception {
+        Job job = claimedJob();
+        job.enterStage(JobStatus.GENERATING, "驳回后重生成中断重启");
+        stubRepo(job);
+        presetResumeArtifacts();   // 上一轮盘上产物：content.json + audio_meta.json + wav（旧剧本/旧音频）
+        JobReviewError latest = new JobReviewError(JOB_ID, "REVIEW", 2, "V1/x: 重启前驳回差异", LocalDateTime.now());
+        when(reviewErrorRepo.findTopByJobIdOrderByIdDesc(JOB_ID)).thenReturn(Optional.of(latest));
+        when(reviewErrorRepo.findByJobIdAndSourceAndRoundOrderByIdAsc(JOB_ID, "REVIEW", 2))
+                .thenReturn(List.of(latest));
+        when(materialStation.generate(any(), anyList())).thenReturn(MATERIAL);
+        when(scriptStation.assemble(any(), any(), anyList()))
+                .thenReturn(JSON.readValue(CONTENT_JSON, ContentJson.class));
+        when(v1.validate(any())).thenReturn(ValidationResult.ok());
+        when(v2.validate(any())).thenReturn(ValidationResult.ok());
+        when(v3.validate(any())).thenReturn(ValidationResult.ok());
+        when(v4.validate(any())).thenReturn(ValidationResult.ok());
+        when(ttsPipeline.synthesizeAll(any(), any())).thenAnswer(inv -> {
+            Path staging = inv.getArgument(1);
+            Files.createDirectories(staging);
+            Files.write(staging.resolve("line_01.wav"), WAV_BYTES);
+            return JSON.readValue(AUDIO_META_JSON, AudioMeta.class);
+        });
+        when(workspaceManager.create(eq(JOB_ID), any(), any(), any())).thenReturn(wsPath());
+        when(renderWorker.render(any(Path.class), any())).thenReturn(artifactsFinal());
+        when(qaFrameCheck.check(any(Path.class))).thenReturn(new QaFrameCheck.QaResult(true, List.of(), 3));
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        // 盲重试消除：重生成收到的是库内读回的错误清单
+        verify(materialStation).generate(any(), eq(List.of("V1/x: 重启前驳回差异")));
+        verify(scriptStation).assemble(any(), any(), eq(List.of("V1/x: 重启前驳回差异")));
+        // I1 跨重启：盘上旧 audio 作废 → TTS 真重录；QA 按当轮剧本现建工作区
+        verify(ttsPipeline, times(1)).synthesizeAll(any(), any());
+        verify(workspaceManager, times(1)).create(anyString(), any(), any(), any());
+        // 题干恢复零成本：ExtractResult 从 content.json problem 段重建，审题工位不重调
+        verify(extractStation, never()).extract(anyString());
+    }
+
+    @Test
+    @DisplayName("T19a 读回归：盘上无 content.json 的驳回回环重启（首轮驳回即中断）→ 题干重新审题恢复 + 清单读回，生成不再是字面 null 盲跑")
+    void resumeIntoGenerating_withoutContentJson_reextractsAndInjectsErrors() throws Exception {
+        Job job = claimedJob();
+        job.enterStage(JobStatus.GENERATING, "首轮驳回后重生成中断重启");
+        stubRepo(job);
+        JobReviewError latest = new JobReviewError(JOB_ID, "REVIEW", 1, "V1/x: 首轮驳回差异", LocalDateTime.now());
+        when(reviewErrorRepo.findTopByJobIdOrderByIdDesc(JOB_ID)).thenReturn(Optional.of(latest));
+        when(reviewErrorRepo.findByJobIdAndSourceAndRoundOrderByIdAsc(JOB_ID, "REVIEW", 1))
+                .thenReturn(List.of(latest));
+        stubStationsOk();   // extract/material/script/v1-v4/tts/qa 全正
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        verify(extractStation).extract(job.getInputText());   // 重新审题恢复 ExtractResult
+        verify(materialStation).generate(any(), eq(List.of("V1/x: 首轮驳回差异")));
+        verify(scriptStation).assemble(any(), any(), eq(List.of("V1/x: 首轮驳回差异")));
     }
 }

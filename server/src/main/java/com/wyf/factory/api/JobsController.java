@@ -4,6 +4,7 @@ import com.wyf.factory.api.GlobalExceptionHandler.ApiException;
 import com.wyf.factory.api.dto.BatchJobRequest;
 import com.wyf.factory.api.dto.CreateJobRequest;
 import com.wyf.factory.api.dto.JobView;
+import com.wyf.factory.api.dto.ReviewErrorView;
 import com.wyf.factory.domain.JobStatus;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
@@ -27,7 +28,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * REST API v1（spec §13）六端点：入队 / 批量入队 / 单查 / 列表 / 取消 / 视频流。
+ * REST API v1（spec §13）六端点 + review-errors 观测端点（T19a）：入队 / 批量入队 / 单查 / 列表 / 取消 / 视频流 / 错误清单。
  * 校验在本层手写（不引 validation 依赖）；业务判定在 {@link JobService}；错误统一 {error} 形状。
  */
 @RestController
@@ -109,6 +110,12 @@ public class JobsController {
                 .contentLength(Files.size(mp4))
                 .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"final.mp4\"")
                 .body(new FileSystemResource(mp4));
+    }
+
+    /** 7. 错误清单（T19a）→ 200 [{jobId,round,source,reason,createdAt}] 按 id 升序；job 不存在 → 404 */
+    @GetMapping("/{id}/review-errors")
+    public List<ReviewErrorView> reviewErrors(@PathVariable String id) {
+        return service.reviewErrors(id);
     }
 
     /** 入队校验矩阵（spec §13 + Ruling-12 + D6），失败即 400 {error:原因} */
