@@ -5,12 +5,12 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import java.util.List;
 
 /**
- * MATERIALIZED 工位产物：讲题视频四段素材（template/README.md §3.1 契约，
- * ASSEMBLED 工位消费）。字段语义与条数范围（knowledge 2-4 / steps 3-10 /
- * pitfalls 1-3 / generalMethod 3-6）由 MaterialStation 校验。
+ * GEN-P2 素材片产物：讲题视频四段素材（template/README.md §3.1 契约，
+ * 合并器消费）。字段语义与条数范围（knowledge 2-4 / steps 3-10 /
+ * pitfalls 1-3 / generalMethod 3-6）由 MaterialShardStation 按骨架计划校验。
  *
  * @param knowledge     知识点回顾（claim/formula/premise/trap）
- * @param steps         解题步骤（usesAnchor 指向题干行 id）
+ * @param steps         解题步骤（usesAnchor 指向题干行 id，取骨架指派）
  * @param pitfalls      易错警示（claim/why）
  * @param generalMethod 通用方法论（step/trick）
  */

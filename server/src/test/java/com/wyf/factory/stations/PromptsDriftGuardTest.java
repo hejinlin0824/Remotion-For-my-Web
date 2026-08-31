@@ -14,9 +14,11 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * SCRIPT prompt 漂移守护（T6 评审 M 项：few-shot 硬编码在常量里，生成脚本未入库，
- * golden/规则改版时可能静默失同步）：断言 SCRIPT 仍含 golden 题干首行的 text 值子串
- * 与 7 组件规则关键短语。golden 直接读 ../template/src/data/content.json（单源）。
+ * 分片 prompt 漂移守护（T6 评审 M 项起源，T18 分片生成重构<b>有意更新</b>）：
+ * golden（封版模板 template/src/data/content.json，只读单源）few-shot 必须在分片 prompt
+ * 中逐字注入——题干片吃 golden problem 段、素材片吃 golden 四段素材、场景片吃 golden
+ * scenes 切片（s10..s14）、协调者吃 golden 派生骨架（条数/锚点/全部场景 id）。
+ * 另守卡片文字硬约束段（自 SCRIPT prompt 迁入 MATERIAL——约束的字段全属 P2 产出）。
  */
 class PromptsDriftGuardTest {
 
@@ -35,8 +37,8 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("SCRIPT 与 golden/规则同步：首行 text 子串 + 7 组件短语都在")
-    void scriptPromptStaysInSyncWithGoldenAndRules() throws Exception {
+    @DisplayName("PROBLEM_SLICE 与 golden 同步：题干首行 text 段逐字注入")
+    void problemSlicePromptStaysInSyncWithGolden() throws Exception {
         JsonNode firstLine = MAPPER.readTree(goldenFile.toFile()).path("problem").path("lines").path(0);
         List<String> textValues = new ArrayList<>();
         for (JsonNode seg : firstLine.path("segments")) {
@@ -46,10 +48,22 @@ class PromptsDriftGuardTest {
         }
         assertThat(textValues).as("golden 首行应存在 text 段").isNotEmpty();
         for (String value : textValues) {
-            assertThat(Prompts.SCRIPT).as("SCRIPT few-shot 应含 golden 首行文本 %s", value).contains(value);
+            assertThat(Prompts.PROBLEM_SLICE).as("题干片 few-shot 应含 golden 首行文本 %s", value).contains(value);
         }
+    }
 
-        assertThat(Prompts.SCRIPT)
+    @Test
+    @DisplayName("SCENE 与 golden/规则同步：golden scenes 切片（s10..s14）逐字注入 + 7 组件短语都在")
+    void scenePromptStaysInSyncWithGoldenAndRules() throws Exception {
+        JsonNode golden = MAPPER.readTree(goldenFile.toFile());
+        for (JsonNode scene : golden.path("scenes")) {
+            String id = scene.path("id").asText();
+            if (List.of("s10", "s11", "s12", "s13", "s14").contains(id)) {
+                assertThat(Prompts.SCENE).as("场景片 few-shot 应含 golden 场景 %s 的 ttsText", id)
+                        .contains(scene.path("ttsText").asText());
+            }
+        }
+        assertThat(Prompts.SCENE)
                 .contains("problem-card")
                 .contains("knowledge-card")
                 .contains("step-card")
@@ -61,9 +75,40 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("Ruling-17：SCRIPT 含结论卡/卡片文字硬约束（可执行、可数：单行短式/字数上限/禁止长分式）")
-    void scriptPromptCarriesCardTextHardConstraints() {
-        assertThat(Prompts.SCRIPT)
+    @DisplayName("COORDINATOR 与 golden 同步：条数计划/锚点指派/全部场景 id 逐字注入")
+    void coordinatorPromptStaysInSyncWithGolden() throws Exception {
+        JsonNode golden = MAPPER.readTree(goldenFile.toFile());
+        assertThat(Prompts.COORDINATOR)
+                .contains("\"knowledge\":3").contains("\"steps\":5")
+                .contains("\"pitfalls\":2").contains("\"generalMethod\":3")
+                .contains("\"anchors\":[\"L1\",\"L2\",\"L2\",\"L3\",\"L3\"]");
+        for (JsonNode scene : golden.path("scenes")) {
+            assertThat(Prompts.COORDINATOR)
+                    .as("协调者 few-shot 应含 golden 场景 %s", scene.path("id").asText())
+                    .contains(scene.path("id").asText());
+        }
+    }
+
+    @Test
+    @DisplayName("MATERIAL 与 golden 同步：知识点/推导 golden 文本逐字注入（四段素材 few-shot 保持）")
+    void materialPromptStaysInSyncWithGolden() throws Exception {
+        JsonNode golden = MAPPER.readTree(goldenFile.toFile());
+        assertThat(Prompts.MATERIAL)
+                .contains(golden.path("knowledge").path(0).path("claim").asText())
+                .as("few-shot 内嵌的是 JSON 转义形态（\\ → \\\\），逐字等价")
+                .contains(jsonEscaped(golden.path("steps").path(0).path("derivation").asText()))
+                .contains(jsonEscaped(golden.path("steps").path(golden.path("steps").size() - 1).path("derivation").asText()));
+    }
+
+    /** golden 值 → prompt few-shot 内嵌形态（JSON 字符串转义：反斜杠翻倍）。 */
+    private static String jsonEscaped(String value) {
+        return value.replace("\\", "\\\\");
+    }
+
+    @Test
+    @DisplayName("Ruling-17：MATERIAL 含结论卡/卡片文字硬约束（可执行、可数：单行短式/字数上限/禁止长分式；T18 自 SCRIPT 迁入）")
+    void materialPromptCarriesCardTextHardConstraints() {
+        assertThat(Prompts.MATERIAL)
                 .as("结论卡硬约束段存在")
                 .contains("卡片文字硬约束")
                 .contains("结论卡")
@@ -85,7 +130,22 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("golden 合规回归：结论卡/generalMethod/pitfalls 文字满足 SCRIPT 硬约束数值")
+    @DisplayName("T18：三条新生成规则进分片 prompt（并列条件拆分/推导逐步自验/口播与画面公式逐符号一致）")
+    void shardPromptsCarryThreeNewGenerationRules() {
+        assertThat(Prompts.COORDINATOR)
+                .contains("并列数学条件必须拆成多步/多条")
+                .contains("逐步自验");
+        assertThat(Prompts.MATERIAL)
+                .contains("并列数学条件必须拆成多行/多段")
+                .contains("推导逐步自验");
+        assertThat(Prompts.SCENE)
+                .contains("并列数学条件必须拆成多场/多 popup")
+                .contains("推导逐步自验")
+                .contains("口播 ttsText 必须与该场景画面公式逐符号一致");
+    }
+
+    @Test
+    @DisplayName("golden 合规回归：结论卡/generalMethod/pitfalls 文字满足 MATERIAL 硬约束数值")
     void goldenContentSatisfiesCardTextHardConstraints() throws Exception {
         JsonNode golden = MAPPER.readTree(goldenFile.toFile());
 

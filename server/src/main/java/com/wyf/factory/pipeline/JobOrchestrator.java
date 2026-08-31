@@ -13,9 +13,7 @@ import com.wyf.factory.repo.JobRepository;
 import com.wyf.factory.repo.JobReviewErrorRepository;
 import com.wyf.factory.stations.ExtractResult;
 import com.wyf.factory.stations.ExtractStation;
-import com.wyf.factory.stations.Material;
-import com.wyf.factory.stations.MaterialStation;
-import com.wyf.factory.stations.ScriptStation;
+import com.wyf.factory.stations.ShardGenException;
 import com.wyf.factory.tts.AudioMeta;
 import com.wyf.factory.tts.TtsPipeline;
 import com.wyf.factory.validate.V1Structural;
@@ -94,17 +92,14 @@ public class JobOrchestrator {
     /** IMAGE 路径送 GLM 视觉通道的 mime（入队校验仅收 base64，统一按 PNG 提交）。 */
     private static final String IMAGE_MIME = "image/png";
 
-    /** 错误清单落库来源（T19a）：V1-V4 驳回 / QA 审帧判负 / 素材工位轻校验 / 剧本工位轻校验。 */
+    /** 错误清单落库来源（T19a/T18）：V1-V4 驳回 / QA 审帧判负 / 分片失败（source=分片名 P0/P1/P2/P3:*）。 */
     static final String SRC_REVIEW = "REVIEW";
     static final String SRC_QA = "QA";
-    static final String SRC_MATERIAL = "MATERIAL";
-    static final String SRC_SCRIPT = "SCRIPT";
 
     private final JobRepository repo;
     private final JobReviewErrorRepository reviewErrorRepo;
     private final ExtractStation extractStation;
-    private final MaterialStation materialStation;
-    private final ScriptStation scriptStation;
+    private final GenShardPipeline genPipeline;
     private final V1Structural v1;
     private final V2Fidelity v2;
     private final V3Refs v3;
@@ -123,8 +118,7 @@ public class JobOrchestrator {
     public JobOrchestrator(JobRepository repo,
                            JobReviewErrorRepository reviewErrorRepo,
                            ExtractStation extractStation,
-                           MaterialStation materialStation,
-                           ScriptStation scriptStation,
+                           GenShardPipeline genPipeline,
                            V1Structural v1,
                            V2Fidelity v2,
                            V3Refs v3,
@@ -139,8 +133,7 @@ public class JobOrchestrator {
         this.repo = repo;
         this.reviewErrorRepo = reviewErrorRepo;
         this.extractStation = extractStation;
-        this.materialStation = materialStation;
-        this.scriptStation = scriptStation;
+        this.genPipeline = genPipeline;
         this.v1 = v1;
         this.v2 = v2;
         this.v3 = v3;
@@ -358,28 +351,28 @@ public class JobOrchestrator {
     private Job doGenerating(Job job, Ctx ctx) {
         if (ctx.contentResumed) {
             // 只有"从盘上恢复"才跳过；上一轮 REVIEWING 驳回生成的 ctx.content 不算（必须重生成）
-            return enterAndSave(job, JobStatus.REVIEWING, "断点续跑：content.json 已在盘，跳过素材/剧本生成");
+            return enterAndSave(job, JobStatus.REVIEWING, "断点续跑：content.json 已在盘，跳过分片生成");
         }
         if (ensureExtracted(job, ctx) == null) {
             return null;   // 生成输入恢复判死/重试路由已落库
         }
         List<String> errors = ctx.reviewErrors;
-        Material material;
-        try {
-            material = semaphores.withGlm(() -> materialStation.generate(ctx.extracted, errors));
-        } catch (GlmException e) {
-            return generationRetryOrFail(job, e, SRC_MATERIAL, ctx);
-        }
         ContentJson content;
         try {
-            content = semaphores.withGlm(() -> scriptStation.assemble(ctx.extracted, material, errors));
+            // T18 分片生成：P0 骨架 → P1 题干片 ∥ P2 素材片 → P3..Pn 场景片 → 合并器
+            // （轮内缓存成功片，驳回轮只补路由命中的分片；GLM 闸由分片流水线内部逐片持锁）
+            content = genPipeline.generate(ctx.extracted, errors, ctx.shards);
+        } catch (ShardGenException e) {
+            return generationRetryOrFail(job, e, ctx);
         } catch (GlmException e) {
-            return generationRetryOrFail(job, e, SRC_SCRIPT, ctx);
+            // 防御兜底（分片流水线正常时把 GlmException 全部包装为 ShardGenException）：
+            // 与 T18 前「任何 GlmException 走预算通道」语义持平，不因重构出现未分类失败
+            return retryOrFail(job, e, "内容生成", job.getGenRetries(), job::setGenRetries, ctx);
         }
         ctx.content = content;
         return enterAndSave(job, JobStatus.REVIEWING, errors.isEmpty()
-                ? "素材+剧本生成完成"
-                : "驳回重生成完成（错误清单已回传，共 " + errors.size() + " 条）");
+                ? "分片生成完成（骨架+题干片+素材片+场景片合并过轻校验）"
+                : "驳回重生成完成（错误清单已按片路由回传，共 " + errors.size() + " 条）");
     }
 
     /**
@@ -413,13 +406,15 @@ public class JobOrchestrator {
     }
 
     /**
-     * 生成工位失败路由（T19a）：工位级轻校验失败（GlmException 结构化携带 problems）先把差异
-     * 清单落库（source=MATERIAL/SCRIPT，轮次=生成尝试序号 genRetries+1），再走既有 retryOrFail；
-     * 瞬态/致命异常 problems 为 null，不落清单直接 retryOrFail——不从 message 反解，无解析歧义。
+     * 生成工位失败路由（T19a/T18）：分片失败（{@link ShardGenException} 结构化携带 problems）
+     * 先把差异清单落库——source=分片名（P0/P1/P2/P3:act3-a…，T18 分片路由观测口径），
+     * 轮次=生成尝试序号 genRetries+1——再走既有 retryOrFail（预算/墙钟语义不变；
+     * 轮内成功片留 {@code ctx.shards} 缓存，重试只补失败片）。瞬态/致命异常 problems 为 null，
+     * 不落清单直接 retryOrFail——不从 message 反解，无解析歧义。
      */
-    private Job generationRetryOrFail(Job job, GlmException e, String source, Ctx ctx) {
+    private Job generationRetryOrFail(Job job, ShardGenException e, Ctx ctx) {
         if (e.getProblems() != null) {
-            persistReviewErrors(job.getId(), source, job.getGenRetries() + 1, e.getProblems());
+            persistReviewErrors(job.getId(), e.getShard(), job.getGenRetries() + 1, e.getProblems());
         }
         return retryOrFail(job, e, "内容生成", job.getGenRetries(), job::setGenRetries, ctx);
     }
@@ -467,10 +462,21 @@ public class JobOrchestrator {
             // 否则续跑场景下 ctx.content 恒非空会被误判为"已在盘"而永不重生成
             ctx.contentResumed = false;
             job.setLastError(tail(String.join("; ", errors), LAST_ERROR_TAIL));
+            String routing = routingSummary(errors, ctx);
+            log.info("job={} V 驳回错误清单分片路由：{}", job.getId(), routing);
             return enterGenerating(job,
-                    "V1-V4 驳回（第 " + (used + 1) + " 轮），错误清单回传重生成");
+                    "V1-V4 驳回（第 " + (used + 1) + " 轮），错误清单回传重生成（分片路由：" + routing + "）");
         }
         return failJob(job, "内容校验连续驳回 " + used + " 轮未过：" + String.join("; ", errors), null, ctx);
+    }
+
+    /**
+     * 驳回清单 → 分片路由摘要（T18 分片级驳回路由观测口径，进 stageHistory note；
+     * 路由本体在 {@link GenShardPipeline#routeErrors}，此处只取摘要字符串）。
+     */
+    private String routingSummary(List<String> errors, Ctx ctx) {
+        String summary = genPipeline.describeRoute(errors, ctx.shards);
+        return summary == null || summary.isBlank() ? "未标注" : summary;
     }
 
     // ------------------------------------------------------------------ 阶段：SPEAKING
@@ -698,7 +704,7 @@ public class JobOrchestrator {
      * QA 判负路由（Ruling-17 结构性主修，R2 实证驱动）：QA 判负 ≠ 环境性失败——job1 六轮
      * 驳回同因（结论卡折行类生成内容缺陷），盲重渲 6/6 复现同缺陷，随机重试对几何溢出类
      * 缺陷命中率极低。故预算内判负 → <b>带 FAIL 清单回 GENERATING 重生成</b>（与 V1-V4 驳回
-     * 同一机制、同一错误注入通道），素材/剧本/TTS 随之自然重做（Ruling-18：预审本就先于渲染，
+     * 同一机制、同一错误注入通道），剧本随之自然重生成、TTS 随之重录（Ruling-18：预审本就先于渲染，
      * 驳回循环零渲染成本）；qaRounds 继续计数，第 maxRounds 轮判负 → FAILED。
      *
      * <p>F2-R2 off-by-one 修复：先自增后比较（qaRounds = 已消耗轮数），maxRounds=5 恰好
@@ -729,7 +735,7 @@ public class JobOrchestrator {
             job.setLastError(tail(fails, LAST_ERROR_TAIL));
             discardStaleFinalQuietly(job);   // 防御残留旧成片：防 RENDERING 断点判定跳过唯一一次渲染
             return enterGeneratingAndReturn(job,
-                    "QA 未过（第 " + round + " 轮），FAIL 清单回传重生成");
+                    "QA 未过（第 " + round + " 轮），FAIL 清单回传重生成（分片路由：" + routingSummary(errors, ctx) + "）");
         }
         return failJob(job, "QA 审帧 " + props.getQa().getMaxRounds() + " 轮未过：" + fails, null, ctx);
     }
@@ -1024,6 +1030,11 @@ public class JobOrchestrator {
         Map<Integer, byte[]> lineWavs = Map.of();
         /** 本轮回传重生成的错误清单（T19a：每次回传同步落 job_review_errors，重启后 loadResume 读回）。 */
         List<String> reviewErrors = List.of();
+        /**
+         * GEN 分片轮内缓存（T18）：P0 骨架/P1 题干片/P2 素材片/P3.. 场景片的当轮成功产物，
+         * 驳回轮只补路由命中的分片。纯进程内存不落盘——重启 = GEN 整段重跑（已知限制）。
+         */
+        final GenShardPipeline.RoundState shards = new GenShardPipeline.RoundState();
         Path workspace;
         Path artifactsDir;
         /** 挂起的终态回调（I3）：handler 内只挂起，loop/process 层闸外统一发送。 */

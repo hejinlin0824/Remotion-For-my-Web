@@ -4,7 +4,7 @@ import java.util.List;
 
 /**
  * EXTRACTING 工位产物：审题后的结构化题目（对应 template/src/data/content.json 的
- * meta.problemType + problem.lines 契约，后续 MATERIALIZED/ASSEMBLED 工位消费）。
+ * meta.problemType + problem.lines 契约，后续 GEN 分片（P0 协调者/P1 题干片/P2 素材片/P3..Pn 场景片）消费）。
  *
  * @param problemType 题型，取值 ∈ {"基础题","计算题","证明题","应用题"}
  * @param lines       题目按行拆分，id 从 "L1" 递增

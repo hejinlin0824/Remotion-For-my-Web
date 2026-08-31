@@ -15,9 +15,7 @@ import com.wyf.factory.repo.JobRepository;
 import com.wyf.factory.repo.JobReviewErrorRepository;
 import com.wyf.factory.stations.ExtractResult;
 import com.wyf.factory.stations.ExtractStation;
-import com.wyf.factory.stations.Material;
-import com.wyf.factory.stations.MaterialStation;
-import com.wyf.factory.stations.ScriptStation;
+import com.wyf.factory.stations.ShardGenException;
 import com.wyf.factory.tts.AudioMeta;
 import com.wyf.factory.tts.TtsPipeline;
 import com.wyf.factory.validate.V1Structural;
@@ -84,8 +82,7 @@ class JobOrchestratorTest {
     @Mock JobRepository repo;
     @Mock JobReviewErrorRepository reviewErrorRepo;
     @Mock ExtractStation extractStation;
-    @Mock MaterialStation materialStation;
-    @Mock ScriptStation scriptStation;
+    @Mock GenShardPipeline genPipeline;
     @Mock V1Structural v1;
     @Mock V2Fidelity v2;
     @Mock V3Refs v3;
@@ -101,7 +98,6 @@ class JobOrchestratorTest {
 
     private static final ExtractResult EXTRACT = new ExtractResult("计算题",
             List.of(new ExtractResult.Line("L1", List.of(new ExtractResult.Seg("text", "设 f(x)=x^3，求 a。")))));
-    private static final Material MATERIAL = new Material(List.of(), List.of(), List.of(), List.of());
     private static final String CONTENT_JSON = """
             {"meta":{"aspect":"16:9","problemType":"计算题"},
              "problem":{"lines":[{"id":"L1","segments":[{"type":"text","value":"设 f(x)=x^3，求 a。"}]}]},
@@ -121,7 +117,7 @@ class JobOrchestratorTest {
         props = new AppProperties();
         props.setWorkspaceDir(tempDir.resolve("workspace").toString());
         props.setArtifactsDir(tempDir.resolve("artifacts").toString());
-        orchestrator = new JobOrchestrator(repo, reviewErrorRepo, extractStation, materialStation, scriptStation,
+        orchestrator = new JobOrchestrator(repo, reviewErrorRepo, extractStation, genPipeline,
                 v1, v2, v3, v4, ttsPipeline, workspaceManager, renderWorker, qaFrameCheck,
                 new ResourceSemaphores(props), callbackClient, props);
     }
@@ -183,8 +179,7 @@ class JobOrchestratorTest {
 
     private void stubStationsOk() throws Exception {
         when(extractStation.extract(anyString())).thenReturn(EXTRACT);
-        when(materialStation.generate(any(), anyList())).thenReturn(MATERIAL);
-        when(scriptStation.assemble(any(), any(), anyList()))
+        when(genPipeline.generate(any(), anyList(), any()))
                 .thenReturn(JSON.readValue(CONTENT_JSON, ContentJson.class));
         when(v1.validate(any())).thenReturn(ValidationResult.ok());
         when(v2.validate(any())).thenReturn(ValidationResult.ok());
@@ -224,11 +219,10 @@ class JobOrchestratorTest {
         assertThat(job.getArtifactsDir())
                 .isEqualTo(artifactsFinal().getParent().toAbsolutePath().normalize().toString());
 
-        InOrder flow = inOrder(extractStation, materialStation, scriptStation,
+        InOrder flow = inOrder(extractStation, genPipeline,
                 v1, v2, v3, v4, ttsPipeline, workspaceManager, renderWorker, qaFrameCheck, callbackClient);
         flow.verify(extractStation).extract(job.getInputText());
-        flow.verify(materialStation).generate(eq(EXTRACT), anyList());
-        flow.verify(scriptStation).assemble(eq(EXTRACT), eq(MATERIAL), anyList());
+        flow.verify(genPipeline).generate(eq(EXTRACT), anyList(), any());
         flow.verify(v1).validate(any());
         flow.verify(v2).validate(any());
         flow.verify(v3).validate(any());
@@ -287,18 +281,13 @@ class JobOrchestratorTest {
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
         assertThat(job.getReviewRetries()).isEqualTo(2);
 
-        ArgumentCaptor<List<String>> materialErrors = ArgumentCaptor.forClass(List.class);
-        verify(materialStation, times(3)).generate(any(), materialErrors.capture());
-        assertThat(materialErrors.getAllValues()).hasSize(3);
-        assertThat(materialErrors.getAllValues().get(0)).isEmpty();
-        assertThat(materialErrors.getAllValues().get(1)).containsExactly("V1/x: 差异一");
-        assertThat(materialErrors.getAllValues().get(2)).containsExactly("V1/y: 差异二");
-
-        ArgumentCaptor<List<String>> scriptErrors = ArgumentCaptor.forClass(List.class);
-        verify(scriptStation, times(3)).assemble(any(), any(), scriptErrors.capture());
-        assertThat(scriptErrors.getAllValues().get(0)).isEmpty();
-        assertThat(scriptErrors.getAllValues().get(1)).containsExactly("V1/x: 差异一");
-        assertThat(scriptErrors.getAllValues().get(2)).containsExactly("V1/y: 差异二");
+        // 分片生成被调 3 次，第 2/3 次带上一轮驳回错误清单（T18 错误注入通道不变）
+        ArgumentCaptor<List<String>> generateErrors = ArgumentCaptor.forClass(List.class);
+        verify(genPipeline, times(3)).generate(any(), generateErrors.capture(), any());
+        assertThat(generateErrors.getAllValues()).hasSize(3);
+        assertThat(generateErrors.getAllValues().get(0)).isEmpty();
+        assertThat(generateErrors.getAllValues().get(1)).containsExactly("V1/x: 差异一");
+        assertThat(generateErrors.getAllValues().get(2)).containsExactly("V1/y: 差异二");
 
         assertThat(historyStages(job)).containsExactly(
                 "QUEUED", "EXTRACTING",
@@ -347,19 +336,13 @@ class JobOrchestratorTest {
         verify(ttsPipeline, times(3)).synthesizeAll(any(), any());   // 剧本变了 → TTS 重做，不得复用旧音频
         verify(workspaceManager, times(3)).create(anyString(), any(), any(), any());   // 每轮预审按当轮剧本现建工作区
 
-        // 第 2/3 次素材与剧本生成的错误清单 = 上轮 QA FAIL 清单（与 V 驳回同一错误注入通道）
-        ArgumentCaptor<List<String>> materialErrors = ArgumentCaptor.forClass(List.class);
-        verify(materialStation, times(3)).generate(any(), materialErrors.capture());
-        assertThat(materialErrors.getAllValues()).hasSize(3);
-        assertThat(materialErrors.getAllValues().get(0)).isEmpty();
-        assertThat(materialErrors.getAllValues().get(1)).containsExactly("FAIL s03 帧 12 结论卡公式等号后折行");
-        assertThat(materialErrors.getAllValues().get(2)).containsExactly("FAIL s05 帧 40 卡片出缘");
-
-        ArgumentCaptor<List<String>> scriptErrors = ArgumentCaptor.forClass(List.class);
-        verify(scriptStation, times(3)).assemble(any(), any(), scriptErrors.capture());
-        assertThat(scriptErrors.getAllValues().get(0)).isEmpty();
-        assertThat(scriptErrors.getAllValues().get(1)).containsExactly("FAIL s03 帧 12 结论卡公式等号后折行");
-        assertThat(scriptErrors.getAllValues().get(2)).containsExactly("FAIL s05 帧 40 卡片出缘");
+        // 第 2/3 次分片生成的错误清单 = 上轮 QA FAIL 清单（与 V 驳回同一错误注入通道）
+        ArgumentCaptor<List<String>> generateErrors = ArgumentCaptor.forClass(List.class);
+        verify(genPipeline, times(3)).generate(any(), generateErrors.capture(), any());
+        assertThat(generateErrors.getAllValues()).hasSize(3);
+        assertThat(generateErrors.getAllValues().get(0)).isEmpty();
+        assertThat(generateErrors.getAllValues().get(1)).containsExactly("FAIL s03 帧 12 结论卡公式等号后折行");
+        assertThat(generateErrors.getAllValues().get(2)).containsExactly("FAIL s05 帧 40 卡片出缘");
 
         assertThat(historyStages(job)).containsExactly(
                 "QUEUED", "EXTRACTING",
@@ -383,8 +366,7 @@ class JobOrchestratorTest {
         assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
         assertThat(job.getQaRounds()).isEqualTo(props.getQa().getMaxRounds());
         verify(qaFrameCheck, times(5)).check(any(Path.class));    // 恰 5 次 QA 判定（off-by-one 修复，T14a 语义保留）
-        verify(materialStation, times(5)).generate(any(), anyList());
-        verify(scriptStation, times(5)).assemble(any(), any(), anyList());
+        verify(genPipeline, times(5)).generate(any(), anyList(), any());
         verify(renderWorker, never()).render(any(Path.class), any());    // Ruling-18：判负循环在渲染之前，一次渲染都不发生
         assertThat(job.getErrorMessage()).contains("QA 审帧 5 轮未过").contains("FAIL s03 结论卡多处不当折行");
         ArgumentCaptor<CallbackClient.CallbackPayload> payload = ArgumentCaptor.forClass(CallbackClient.CallbackPayload.class);
@@ -402,7 +384,7 @@ class JobOrchestratorTest {
         ContentJson v1 = JSON.readValue(CONTENT_JSON, ContentJson.class);
         ContentJson v2 = JSON.readValue(CONTENT_JSON.replace("第一句口播", "第二版口播"), ContentJson.class);
         assertThat(v2).isNotEqualTo(v1);
-        when(scriptStation.assemble(any(), any(), anyList())).thenReturn(v1, v2);
+        when(genPipeline.generate(any(), anyList(), any())).thenReturn(v1, v2);
         when(qaFrameCheck.check(any(Path.class)))
                 .thenReturn(new QaFrameCheck.QaResult(false, List.of("FAIL s03 结论卡折行"), 3))
                 .thenReturn(new QaFrameCheck.QaResult(true, List.of(), 3));
@@ -463,7 +445,7 @@ class JobOrchestratorTest {
         assertThat(job.getErrorMessage()).contains("未识别到数学题");
         verify(extractStation, times(1)).extract(anyString());
         assertThat(job.getExtractRetries()).isZero();
-        verifyNoInteractions(materialStation, scriptStation, ttsPipeline);
+        verifyNoInteractions(genPipeline, ttsPipeline);
     }
 
     // ---- 6. 断点续跑 ----
@@ -488,7 +470,7 @@ class JobOrchestratorTest {
         orchestrator.process(JOB_ID);
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
-        verifyNoInteractions(extractStation, materialStation, scriptStation, ttsPipeline);
+        verifyNoInteractions(extractStation, genPipeline, ttsPipeline);
         // 断点续跑时 V2 以 content.json problem 段为基准（历史 note 记录）
         assertThat(job.getStageHistory())
                 .extracting(StageHistoryEntry::getNote)
@@ -543,7 +525,7 @@ class JobOrchestratorTest {
         assertThat(historyStages(job)).containsExactly(
                 "QUEUED", "EXTRACTING", "GENERATING", "REVIEWING", "CANCELLED");
         verify(extractStation).extract(anyString());
-        verify(materialStation).generate(any(), anyList());
+        verify(genPipeline).generate(any(), anyList(), any());
         verify(v1, never()).validate(any());
         verifyNoInteractions(ttsPipeline, renderWorker, qaFrameCheck);
         verify(workspaceManager).cleanup(JOB_ID);   // 清理工作区、不产 artifacts
@@ -781,8 +763,7 @@ class JobOrchestratorTest {
         when(v4.validate(any()))
                 .thenReturn(ValidationResult.fail(List.of("V1/x: 续跑剧本不合格")))
                 .thenReturn(ValidationResult.ok());
-        when(materialStation.generate(any(), anyList())).thenReturn(MATERIAL);
-        when(scriptStation.assemble(any(), any(), anyList()))
+        when(genPipeline.generate(any(), anyList(), any()))
                 .thenReturn(JSON.readValue(CONTENT_JSON, ContentJson.class));
         when(workspaceManager.create(eq(JOB_ID), any(), any(), any())).thenReturn(wsPath());
         when(renderWorker.render(any(Path.class), any())).thenReturn(artifactsFinal());
@@ -793,8 +774,7 @@ class JobOrchestratorTest {
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
         verify(extractStation, never()).extract(anyString());   // 题干仍走续跑
         // 续跑首次跳过生成；驳回后必须真正重生成一次（I1 修复前 contentResumed 恒 true 会零调用）
-        verify(materialStation, times(1)).generate(any(), anyList());
-        verify(scriptStation, times(1)).assemble(any(), any(), anyList());
+        verify(genPipeline, times(1)).generate(any(), anyList(), any());
         verify(v4, times(2)).validate(any());
         assertThat(job.getReviewRetries()).isEqualTo(1);
     }
@@ -807,10 +787,10 @@ class JobOrchestratorTest {
         Job job = claimedJob();
         stubRepo(job);
         stubStationsOk();
-        when(materialStation.generate(any(), anyList())).thenAnswer(inv -> {
+        when(genPipeline.generate(any(), anyList(), any())).thenAnswer(inv -> {
             // 模拟库内死线已过（如重启续跑后墙钟到点）：进 GENERATING 后死线为过去时刻
             job.setGenDeadlineAt(LocalDateTime.now().minusMinutes(1));
-            throw new GlmException("GLM 请求 IO/超时失败（视为瞬态）", true);
+            throw new ShardGenException("P2", new GlmException("GLM 请求 IO/超时失败（视为瞬态）", true));
         });
 
         orchestrator.process(JOB_ID);
@@ -819,7 +799,7 @@ class JobOrchestratorTest {
         assertThat(job.getGenRetries()).isZero();   // 无视剩余次数：不进入计数路径
         assertThat(job.getErrorMessage()).contains("重试墙钟超限").contains("GLM 请求 IO/超时失败");
         assertThat(job.getLastError()).contains("重试墙钟超限");
-        verify(materialStation, times(1)).generate(any(), anyList());
+        verify(genPipeline, times(1)).generate(any(), anyList(), any());
     }
 
     @Test
@@ -828,15 +808,15 @@ class JobOrchestratorTest {
         Job job = claimedJob();
         stubRepo(job);
         stubStationsOk();
-        when(materialStation.generate(any(), anyList()))
-                .thenThrow(new GlmException("GLM 请求 IO/超时失败（视为瞬态）", true));
+        when(genPipeline.generate(any(), anyList(), any()))
+                .thenThrow(new ShardGenException("P2", new GlmException("GLM 请求 IO/超时失败（视为瞬态）", true)));
 
         orchestrator.process(JOB_ID);
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
         assertThat(job.getErrorMessage()).contains("重试 3 次预算耗尽").doesNotContain("墙钟");
         assertThat(job.getGenRetries()).isEqualTo(props.getRetry().getContentMax());
-        verify(materialStation, times(props.getRetry().getContentMax() + 1)).generate(any(), anyList());
+        verify(genPipeline, times(props.getRetry().getContentMax() + 1)).generate(any(), anyList(), any());
         // 死线落库：进 GENERATING 时即落 now+配置值（默认 30min）
         assertThat(job.getGenDeadlineAt()).isNotNull();
         assertThat(job.getGenDeadlineAt()).isAfter(LocalDateTime.now().plusMinutes(28));
@@ -979,15 +959,18 @@ class JobOrchestratorTest {
     }
 
     @Test
-    @DisplayName("T19a：工位轻校验失败清单落库——素材工位 source=MATERIAL（轮次=生成尝试序号）；瞬态异常无清单不落库")
-    void materialValidation_persistsProblems_transientNotPersisted() throws Exception {
+    @DisplayName("T18/T19a：分片轻校验失败清单落库——source=分片名 P2（T18 分片路由观测口径）；瞬态异常无清单不落库")
+    void shardValidation_persistsProblems_transientNotPersisted() throws Exception {
         Job job = claimedJob();
         stubRepo(job);
         stubStationsOk();
-        when(materialStation.generate(any(), anyList()))
-                .thenThrow(new GlmException(List.of("knowledge 缺失或不是非空数组", "steps 条数 2 超出范围 3-10"), true))
-                .thenThrow(new GlmException("GLM 请求 IO/超时失败（视为瞬态）", true))
-                .thenReturn(MATERIAL);
+        when(genPipeline.generate(any(), anyList(), any()))
+                .thenThrow(new ShardGenException("P2",
+                        List.of("素材 steps 条数 2 与骨架计划 3 不一致（条数以骨架为准）",
+                                "素材 steps[1].usesAnchor='L9' 与骨架指派 'L2' 不一致（锚点只能领用骨架指派，不得自行改锚）"),
+                        null))
+                .thenThrow(new ShardGenException("P2", new GlmException("GLM 请求 IO/超时失败（视为瞬态）", true)))
+                .thenReturn(JSON.readValue(CONTENT_JSON, ContentJson.class));
 
         orchestrator.process(JOB_ID);
 
@@ -997,20 +980,22 @@ class JobOrchestratorTest {
         verify(reviewErrorRepo, times(1)).saveAll(saved.capture());   // 瞬态那次不落
         assertThat(saved.getAllValues().get(0))
                 .extracting(JobReviewError::getJobId, JobReviewError::getSource, JobReviewError::getRound)
-                .containsOnly(tuple(JOB_ID, "MATERIAL", 1));   // 一行一条原因：2 行同属本事件
+                .containsOnly(tuple(JOB_ID, "P2", 1));   // 一行一条原因：2 行同属本事件；source=分片名
         assertThat(saved.getAllValues().get(0))
                 .extracting(JobReviewError::getReason)
-                .containsExactly("knowledge 缺失或不是非空数组", "steps 条数 2 超出范围 3-10");
+                .containsExactly("素材 steps 条数 2 与骨架计划 3 不一致（条数以骨架为准）",
+                        "素材 steps[1].usesAnchor='L9' 与骨架指派 'L2' 不一致（锚点只能领用骨架指派，不得自行改锚）");
     }
 
     @Test
-    @DisplayName("T19a：剧本工位轻校验失败清单落库——source=SCRIPT，重试通过后照常推进")
-    void scriptValidation_persistsProblems() throws Exception {
+    @DisplayName("T18/T19a：题干片失败清单落库——source=P1，重试通过后照常推进")
+    void problemShardValidation_persistsProblems() throws Exception {
         Job job = claimedJob();
         stubRepo(job);
         stubStationsOk();
-        when(scriptStation.assemble(any(), any(), anyList()))
-                .thenThrow(new GlmException(List.of("scenes[0] 缺必需字段 ttsText"), true))
+        when(genPipeline.generate(any(), anyList(), any()))
+                .thenThrow(new ShardGenException("P1",
+                        List.of("题干片 L1 段 2 内容被改写（保真红线）"), null))
                 .thenReturn(JSON.readValue(CONTENT_JSON, ContentJson.class));
 
         orchestrator.process(JOB_ID);
@@ -1022,7 +1007,28 @@ class JobOrchestratorTest {
         assertThat(saved.getAllValues().get(0))
                 .extracting(JobReviewError::getJobId, JobReviewError::getSource, JobReviewError::getRound,
                         JobReviewError::getReason)
-                .containsExactly(tuple(JOB_ID, "SCRIPT", 1, "scenes[0] 缺必需字段 ttsText"));
+                .containsExactly(tuple(JOB_ID, "P1", 1, "题干片 L1 段 2 内容被改写（保真红线）"));
+    }
+
+    // ---- 19b. T18：驳回路由观测标注（分片路由进 stageHistory note） ----
+
+    @Test
+    @DisplayName("T18：V 驳回 note 携带分片路由摘要（describeRoute），QA 判负同")
+    void rejectionNote_carriesShardRoutingSummary() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(genPipeline.describeRoute(anyList(), any())).thenReturn("P2");
+        when(v4.validate(any()))
+                .thenReturn(ValidationResult.fail(List.of("V1/x: 差异一")))
+                .thenReturn(ValidationResult.ok());
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        assertThat(job.getStageHistory())
+                .extracting(StageHistoryEntry::getNote)
+                .anySatisfy(note -> assertThat(note).contains("V1-V4 驳回").contains("分片路由：P2"));
     }
 
     // ---- 20. T19a 读回归：重启续跑进 GENERATING 时从库读回（消除盲重试降级） ----
@@ -1038,8 +1044,7 @@ class JobOrchestratorTest {
         when(reviewErrorRepo.findTopByJobIdOrderByIdDesc(JOB_ID)).thenReturn(Optional.of(latest));
         when(reviewErrorRepo.findByJobIdAndSourceAndRoundOrderByIdAsc(JOB_ID, "REVIEW", 2))
                 .thenReturn(List.of(latest));
-        when(materialStation.generate(any(), anyList())).thenReturn(MATERIAL);
-        when(scriptStation.assemble(any(), any(), anyList()))
+        when(genPipeline.generate(any(), anyList(), any()))
                 .thenReturn(JSON.readValue(CONTENT_JSON, ContentJson.class));
         when(v1.validate(any())).thenReturn(ValidationResult.ok());
         when(v2.validate(any())).thenReturn(ValidationResult.ok());
@@ -1058,9 +1063,8 @@ class JobOrchestratorTest {
         orchestrator.process(JOB_ID);
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
-        // 盲重试消除：重生成收到的是库内读回的错误清单
-        verify(materialStation).generate(any(), eq(List.of("V1/x: 重启前驳回差异")));
-        verify(scriptStation).assemble(any(), any(), eq(List.of("V1/x: 重启前驳回差异")));
+        // 盲重试消除：重生成收到的是库内读回的错误清单（分片流水线入参）
+        verify(genPipeline).generate(any(), eq(List.of("V1/x: 重启前驳回差异")), any());
         // I1 跨重启：盘上旧 audio 作废 → TTS 真重录；QA 按当轮剧本现建工作区
         verify(ttsPipeline, times(1)).synthesizeAll(any(), any());
         verify(workspaceManager, times(1)).create(anyString(), any(), any(), any());
@@ -1084,7 +1088,6 @@ class JobOrchestratorTest {
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
         verify(extractStation).extract(job.getInputText());   // 重新审题恢复 ExtractResult
-        verify(materialStation).generate(any(), eq(List.of("V1/x: 首轮驳回差异")));
-        verify(scriptStation).assemble(any(), any(), eq(List.of("V1/x: 首轮驳回差异")));
+        verify(genPipeline).generate(any(), eq(List.of("V1/x: 首轮驳回差异")), any());
     }
 }
