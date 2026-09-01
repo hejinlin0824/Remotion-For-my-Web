@@ -267,6 +267,67 @@ class GenShardPipelineTest {
                 .summary()).isEqualTo("P1");
     }
 
+    // ---- 2b. QA 排版类驳回路由（T24a，事故 001db856） ----
+
+    @Test
+    @DisplayName("T24a QA 排版类驳回（事故 001db856）：FAIL 行含排版词 → 场景片级重做（P3 全部分片；P0/P1/P2 不重做）")
+    void qaLayoutReject_routesSceneShardsOnly_p0p1p2Untouched() {
+        // 事故原文形状：report.md 的 FAIL 行是自由散文（无场景 id——帧名 s-s10 只在
+        // 「## s-s10-step-card.png」标题行，QaFrameCheck 不收集标题 → 路由只能拿到散文），
+        // 旧路由解析不出 → 全量重做把 P0 拖下水 → 连续 4 轮 knowledge=4 违规 FAILED。
+        String incident = "**FAIL** —— 大字结论行「选 A：…不稳」溢出卡片右缘被截断裁字，构成排版崩坏。";
+        GenShardPipeline.RoutePlan plan = pipeline.routeErrors(List.of(incident), SMALL);
+        assertThat(plan.redoAll()).as("排版病不该拖 P0 全量重做").isFalse();
+        assertThat(plan.summary()).isEqualTo("P3:act2+P3:act3-a+P3:act4");
+        assertThat(plan.errorsFor(GenShardPipeline.P0)).isEmpty();
+        assertThat(plan.errorsFor(GenShardPipeline.P1)).isEmpty();
+        assertThat(plan.errorsFor(GenShardPipeline.P2)).isEmpty();
+        assertThat(plan.errorsFor("P3:act2")).containsExactly(incident);
+
+        // 词表逐词：只含单个排版词的自由散文 FAIL 行同样路由场景片（GOLDEN_LIKE 四片含 act3-b）
+        for (String word : GenShardPipeline.QA_LAYOUT_WORDS) {
+            GenShardPipeline.RoutePlan byWord = pipeline.routeErrors(
+                    List.of("FAIL 帧 12 卡片文字" + word), GOLDEN_LIKE);
+            assertThat(byWord.redoAll()).as("排版词「%s」应命中场景片路由", word).isFalse();
+            assertThat(byWord.summary()).as("排版词「%s」", word)
+                    .isEqualTo("P3:act2+P3:act3-a+P3:act3-b+P3:act4");
+        }
+
+        // 携带计划内场景 id 的排版行仍走既有单场景归属（零细化成本，机制早已在）
+        GenShardPipeline.RoutePlan single = pipeline.routeErrors(
+                List.of("FAIL s-s04-step-card.png 大字溢出被截断"), SMALL);
+        assertThat(single.summary()).isEqualTo("P3:act3-a");
+    }
+
+    @Test
+    @DisplayName("T24a 非排版 QA 驳回回归：数学错/口播不符/降级原因等自由文本仍保守全量（行为不变）")
+    void qaNonLayoutReject_stillRedoAll() {
+        for (String error : List.of(
+                "**FAIL** —— QA 核数学：汇总结论「选 A 正确」与推导矛盾",
+                "FAIL 帧 40 结论卡公式与口播不符",
+                "qa_glm exit=1",
+                "[error] s-s10-step-card.png 单帧审帧最终失败（计划外场景 id）")) {
+            GenShardPipeline.RoutePlan plan = pipeline.routeErrors(List.of(error), SMALL);
+            assertThat(plan.redoAll()).as("「%s」非排版病，仍全量重做", error).isTrue();
+            assertThat(plan.summary()).as("「%s」", error).isEqualTo("全部");
+        }
+    }
+
+    @Test
+    @DisplayName("T24a 边界：空错误清单=零路由不重做；零场景骨架+排版词=保守全量（无场景片可路由）")
+    void layoutRouting_boundaries() {
+        GenShardPipeline.RoutePlan empty = pipeline.routeErrors(List.of(), SMALL);
+        assertThat(empty.redoAll()).isFalse();
+        assertThat(empty.summary()).isEmpty();
+
+        Skeleton noScenes = new Skeleton("计算题", new Skeleton.Counts(2, 3, 1, 3),
+                List.of("L1", "L2", "L3"), List.of(),
+                List.of(new Skeleton.GlossaryTerm("判别式", "判别式")));
+        GenShardPipeline.RoutePlan plan = pipeline.routeErrors(List.of("FAIL 帧 12 大字溢出截断"), noScenes);
+        assertThat(plan.redoAll()).as("无场景片可路由 → 保守全量").isTrue();
+        assertThat(plan.summary()).isEqualTo("全部");
+    }
+
     // ---- 3. 轮内只补错片（缓存复用） ----
 
     @Test

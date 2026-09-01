@@ -45,7 +45,8 @@ import java.util.regex.Pattern;
  *
  * <p><b>分片级驳回路由</b>：V 驳回/QA 判负错误串解析归属（{@link #routeErrors}）——
  * steps[i]/knowledge[i]/pitfalls[i]/generalMethod[i]→P2、场景 id（s01）或 scenes[i]→
- * 对应场景片、V2/题干→P1、含「结论」（结论卡=steps 末条 derivation，P2 字段）→P2；
+ * 对应场景片、V2/题干→P1、含「结论」（结论卡=steps 末条 derivation，P2 字段）→P2、
+ * QA 排版词（{@link #QA_LAYOUT_WORDS}，事故 001db856）→P3 全部分片（P0/P1/P2 不重做）；
  * 解析不出归属 → 全部分片重做（保守回退，含 P0）。轮内只重做路由命中的分片，
  * 其余分片沿用 {@link RoundState} 缓存；预算语义不变（content-max=3、genDeadline、
  * reviewErrors 通道照旧）。</p>
@@ -81,6 +82,17 @@ public class GenShardPipeline {
     private static final Pattern SCENE_ID = Pattern.compile("\\bs\\d{2}\\b");
     /** scenes[下标] 形态识别（V1 散文检查等按合并后下标注） */
     private static final Pattern SCENE_INDEX = Pattern.compile("scenes\\[(\\d+)]");
+
+    /**
+     * QA 排版类驳回词表（事故 001db856 驱动，词表随事故生长）：QA FAIL 行含任一词即判
+     * <b>排版病</b>（溢出/截字类画面缺陷）。排版病与骨架无关——内容已过 V1-V4 与 QA 数学核
+     * （事故原文「大字结论行溢出截字」是四性质题，QA 数学核已判内容正确），保守全量重做会把
+     * P0 拖回重排，GLM 对条数的正确内容判断反而被旧规格表反复打回（4 连败 knowledge=4 FAILED
+     * 16min41s）。故排版类驳回只路由 <b>场景片级重做</b>（P3 全部分片；P0/P1/P2 不重做）。
+     * 携带场景 id/素材段/题干令牌的排版消息仍按既有映射优先（更细归属不落本词表分支）。
+     */
+    static final List<String> QA_LAYOUT_WORDS = List.of(
+            "溢出", "截字", "截断", "裁字", "断行", "换行错位", "超出");
 
     private final CoordinatorStation coordinator;
     private final ProblemSliceStation problemSlice;
@@ -210,7 +222,8 @@ public class GenShardPipeline {
      * 错误清单 → 分片归属（纯函数，编排器驳回时用于观测标注、生成时用于轮内补片）。
      * 映射表：steps[i]/knowledge[i]/pitfalls[i]/generalMethod[i]（含条数变体）→P2；
      * 场景 id（s01）或 scenes[i]（合并后下标）→对应场景片；V2/题干→P1；
-     * 含「结论」→P2（结论卡=steps 末条 derivation）；解析不出 → redoAll（保守回退，含 P0）。
+     * 含「结论」→P2（结论卡=steps 末条 derivation）；QA 排版词（{@link #QA_LAYOUT_WORDS}，
+     * 无更细归属时）→P3 全部分片（事故 001db856）；解析不出 → redoAll（保守回退，含 P0）。
      */
     public RoutePlan routeErrors(List<String> errors, Skeleton skeleton) {
         List<SceneShard> shards = groupScenes(skeleton.scenes());
@@ -276,7 +289,15 @@ public class GenShardPipeline {
         if (error.contains("V2") || error.contains("题干")) {
             return List.of(P1);
         }
-        // ⑤ 解析不出归属（meta/幕覆盖/自由文本等）→ 全部分片重做
+        // ⑤ QA 排版类驳回（T24a，事故 001db856）：自由散文 FAIL 行含排版词（{@link #QA_LAYOUT_WORDS}）
+        //   → 排版病只重做场景片（P3 全部分片；P0/P1/P2 不重做——内容已过 V1-V4+QA 数学核，
+        //   骨架与排版无关，全量重做只会烧轮并诱发条数规格连败）。置于所有既有映射之后兜底：
+        //   带场景 id/素材段/题干令牌的消息在 ①-④ 已有更细归属，不落本分支，行为零变化。
+        //   无场景片可路由（骨架零场景）→ null 走保守全量。
+        if (QA_LAYOUT_WORDS.stream().anyMatch(error::contains)) {
+            return shards.isEmpty() ? null : shards.stream().map(SceneShard::key).toList();
+        }
+        // ⑥ 解析不出归属（meta/幕覆盖/自由文本等）→ 全部分片重做
         return null;
     }
 
