@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>考研数学讲题工厂</title>
+<style>
+  :root {
+    --line: #d8dee6; --bg: #f5f7fa; --card: #ffffff; --ink: #1f2933;
+    --muted: #6b7684; --brand: #2563eb; --ok: #16a34a; --warn: #b45309;
+    --bad: #dc2626; --warnbg: #fef3c7; --badbg: #fee2e2;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 64px; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    font-size: 15px; line-height: 1.6;
+  }
+  main { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 18px;
+  }
+  .card h2 { font-size: 16px; margin: 0 0 12px; }
+  [hidden] { display: none !important; }
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+  button {
+    font: inherit; padding: 7px 18px; border-radius: 7px; border: 1px solid var(--line);
+    background: #fff; cursor: pointer;
+  }
+  button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+  button.danger { background: #fff; border-color: var(--bad); color: var(--bad); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .tab { border-radius: 7px 7px 0 0; border-bottom-color: transparent; }
+  .tab.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+  textarea {
+    width: 100%; font: inherit; padding: 10px; border: 1px solid var(--line);
+    border-radius: 7px; resize: vertical; min-height: 140px;
+  }
+  textarea:focus, select:focus { outline: 2px solid #bfd4ff; }
+  select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; }
+  #drop-zone {
+    border: 2px dashed var(--line); border-radius: 8px; padding: 26px; text-align: center;
+    color: var(--muted); cursor: pointer;
+  }
+  #drop-zone.over { border-color: var(--brand); background: #eff5ff; color: var(--brand); }
+  #img-preview { margin-top: 12px; display: flex; gap: 14px; align-items: flex-start; }
+  #preview-img { max-width: 220px; max-height: 160px; border: 1px solid var(--line); border-radius: 6px; }
+  .img-meta { color: var(--muted); font-size: 13px; }
+  .err { color: var(--bad); font-size: 13px; }
+  .err-box {
+    background: var(--badbg); border: 1px solid #f3b4b4; border-radius: 7px;
+    padding: 10px 12px; margin: 10px 0; white-space: pre-wrap; word-break: break-all;
+    font-size: 13px; max-height: 180px; overflow: auto;
+  }
+  .mono { font-family: Consolas, Menlo, monospace; font-size: 13px; color: var(--muted); }
+  .bar-wrap {
+    position: relative; height: 26px; background: #e8ecf2; border-radius: 13px; overflow: hidden;
+  }
+  .bar {
+    height: 100%; width: 0; border-radius: 13px; transition: width .8s ease;
+    background: linear-gradient(90deg, #3b82f6, #16a34a);
+  }
+  .bar-label {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 600; color: #123; text-shadow: 0 0 4px #fff;
+  }
+  .stage-meta { color: var(--muted); font-size: 13px; margin-top: 8px; }
+  #stage-list { list-style: none; padding: 0; margin: 12px 0 0; display: flex; gap: 18px; flex-wrap: wrap; }
+  #stage-list li { font-size: 14px; color: var(--muted); }
+  #stage-list .sym { font-weight: 700; margin-right: 4px; }
+  #stage-list li.done { color: var(--ok); }
+  #stage-list li.active { color: var(--brand); }
+  #stage-list li.interrupt { color: var(--bad); }
+  #stage-list .note { font-size: 12px; color: var(--warn); }
+  #retry-box {
+    margin-top: 12px; background: var(--warnbg); border: 1px solid #f0d48a;
+    border-radius: 7px; padding: 8px 12px; font-size: 13px; color: var(--warn);
+  }
+  #retry-box div { margin: 2px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 10px; }
+  th, td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: #f0f3f7; }
+  td.reason { word-break: break-all; max-width: 520px; }
+  .fail-head { color: var(--bad); }
+  .tag {
+    display: inline-block; padding: 1px 9px; border-radius: 10px; font-size: 12px;
+    background: var(--warnbg); color: var(--warn); border: 1px solid #f0d48a;
+  }
+  video { width: 100%; max-height: 480px; background: #000; border-radius: 8px; }
+  #video-meta { color: var(--muted); font-size: 13px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>考研数学讲题工厂</h1>
+  <p class="sub">题目输入 → 后台制作 → 成片播放（单任务模式；刷新或分享链接可凭地址栏编号恢复查看进度）</p>
+  <noscript>本页需要启用 JavaScript。</noscript>
+
+  <!-- 区 1：输入 -->
+  <section id="input-section" class="card">
+    <h2>① 输入题目</h2>
+    <div class="tabs">
+      <button type="button" id="tab-text" class="tab active">文字题目</button>
+      <button type="button" id="tab-image" class="tab">图片题目</button>
+    </div>
+    <div id="pane-text">
+      <textarea id="q-text" placeholder="粘贴题目全文（可含 LaTeX，如 $f(x)=x^2$）…" spellcheck="false"></textarea>
+    </div>
+    <div id="pane-image" hidden>
+      <div id="drop-zone">点击选择图片，或将图片拖拽到此处（png / jpg 等，不超过 10MB）</div>
+      <input type="file" id="q-image" accept="image/*" hidden>
+      <div id="img-preview" hidden>
+        <img id="preview-img" alt="题目图片预览">
+        <div>
+          <div class="img-meta" id="img-meta"></div>
+          <div class="row" style="margin-top:8px"><button type="button" id="img-clear">移除图片</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <label>渲染档位
+        <select id="q-res">
+          <option value="720p" selected>720p（开发默认）</option>
+          <option value="1080p">1080p</option>
+        </select>
+      </label>
+      <button type="button" id="submit-btn" class="primary">提交制作</button>
+      <span id="input-error" class="err" hidden></span>
+    </div>
+  </section>
+
+  <!-- 区 2：进度 -->
+  <section id="progress-section" class="card" hidden>
+    <h2>② 制作进度 <span class="mono" id="job-id-label"></span> <span class="tag" id="cancel-tag" hidden>已请求取消，等终态</span></h2>
+    <div class="bar-wrap">
+      <div class="bar" id="bar"></div>
+      <div class="bar-label" id="bar-label"></div>
+    </div>
+    <div class="stage-meta"><span id="stage-label"></span> · <span id="elapsed-label"></span> · <span id="job-meta"></span></div>
+    <ul id="stage-list"></ul>
+    <div id="retry-box" hidden></div>
+    <div class="row" id="cancel-row">
+      <button type="button" id="cancel-btn" class="danger" hidden>取消任务</button>
+      <span id="cancel-msg" class="err" hidden></span>
+      <span id="poll-msg" class="err" hidden></span>
+    </div>
+    <div id="fail-panel" hidden>
+      <h3 class="fail-head" id="fail-title"></h3>
+      <div class="err-box" id="fail-error"></div>
+      <div id="fail-table-wrap">
+        <table>
+          <thead><tr><th>轮次</th><th>来源</th><th>驳回 / 判负原因</th></tr></thead>
+          <tbody id="fail-tbody"></tbody>
+        </table>
+      </div>
+      <div class="row"><button type="button" id="again-btn" class="primary">再提一单</button></div>
+    </div>
+  </section>
+
+  <!-- 区 3：播放 -->
+  <section id="player-section" class="card" hidden>
+    <h2>③ 成片播放</h2>
+    <!-- src 仅在 DONE 时才赋值：非 DONE 不发起 video 请求（服务端 DONE 门禁，非 DONE 一律 404） -->
+    <video id="player" controls preload="metadata" hidden></video>
+    <div id="video-meta"></div>
+  </section>
+</main>
+
+<script>
+'use strict';
+/* ===== 常量：端点 / 状态机 / 加权进度（按 run-3 实测健康路径耗时占比） ===== */
+var API = '/api/v1/jobs';
+var POLL_MS = 3000;
+var MAX_IMG_BYTES = 10 * 1024 * 1024;
+var TERMINAL = ['DONE', 'FAILED', 'CANCELLED'];
+/* 可取消窗口（SPEAKING 起不可取消，故 SPEAKING 不显示取消按钮） */
+var CANCELLABLE = ['QUEUED', 'EXTRACTING', 'GENERATING', 'REVIEWING', 'QA', 'RENDERING'];
+/* 阶段累计刻度：EXTRACTING 1% → GENERATING/REVIEWING 33% → SPEAKING 42% → QA 48% → RENDERING 100% */
+var PROGRESS = { QUEUED: 0, EXTRACTING: 1, GENERATING: 33, REVIEWING: 33, SPEAKING: 42, QA: 48, RENDERING: 100, DONE: 100 };
+var STAGE_ZH = {
+  QUEUED: '排队中', EXTRACTING: '审题（题目抽取）', GENERATING: '生成课件',
+  REVIEWING: '审校 / 驳回回环', SPEAKING: '配音合成', QA: '审帧预审',
+  RENDERING: '渲染成片', DONE: '已完成', FAILED: '失败', CANCELLED: '已取消'
+};
+/* 五项阶段清单；REVIEWING 不单列，归入「生成」段内回环附注 */
+var PHASES = [
+  { key: 'EXTRACTING', label: '审题' },
+  { key: 'GENERATING', label: '生成' },
+  { key: 'SPEAKING',   label: '配音' },
+  { key: 'QA',         label: '审帧' },
+  { key: 'RENDERING',  label: '渲染' }
+];
+/* status → 清单中正在进行的相位下标（-1 尚未开始 / 5 全部完成）；REVIEWING 归生成段 */
+var ACTIVE = { QUEUED: -1, EXTRACTING: 0, GENERATING: 1, REVIEWING: 1, SPEAKING: 2, QA: 3, RENDERING: 4, DONE: 5 };
+
+/* ===== 运行态 ===== */
+var jobId = null;
+var job = null;
+var pollTimer = null;
+var tickTimer = null;
+var inputType = 'TEXT';
+var imageBase64 = '';
+
+function $(id) { return document.getElementById(id); }
+
+/* ===== 区 1：输入 ===== */
+function setInputError(msg) {
+  var el = $('input-error');
+  el.textContent = msg || '';
+  el.hidden = !msg;
+}
+function switchTab(t) {
+  inputType = t;
+  $('tab-text').className = 'tab' + (t === 'TEXT' ? ' active' : '');
+  $('tab-image').className = 'tab' + (t === 'IMAGE' ? ' active' : '');
+  $('pane-text').hidden = t !== 'TEXT';
+  $('pane-image').hidden = t !== 'IMAGE';
+  setInputError('');
+}
+function handleFile(file) {
+  if (!file) return;
+  if (!file.type || file.type.indexOf('image/') !== 0) { setInputError('请选择图片文件（image/*）'); return; }
+  if (file.size > MAX_IMG_BYTES) { setInputError('图片超过 10MB 上限（当前 ' + fmtBytes(file.size) + '），请压缩后重试'); return; }
+  setInputError('');
+  var reader = new FileReader();
+  reader.onload = function () {
+    var dataUrl = String(reader.result);
+    /* 服务端契约是裸 base64：剥掉 data:...;base64, 前缀 */
+    var i = dataUrl.indexOf('base64,');
+    imageBase64 = i >= 0 ? dataUrl.slice(i + 'base64,'.length) : dataUrl;
+    $('preview-img').src = dataUrl;
+    $('img-meta').textContent = file.name || '（剪贴板图片） · ' + fmtBytes(file.size) + ' · 已就绪';
+    $('img-preview').hidden = false;
+  };
+  reader.onerror = function () { setInputError('读取图片失败，请重试'); };
+  reader.readAsDataURL(file);
+}
+function clearImage() {
+  imageBase64 = '';
+  $('q-image').value = '';
+  $('preview-img').removeAttribute('src');
+  $('img-meta').textContent = '';
+  $('img-preview').hidden = true;
+}
+function fmtBytes(n) {
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + 'MB';
+  if (n >= 1024) return (n / 1024).toFixed(0) + 'KB';
+  return n + 'B';
+}
+
+/* ===== 提交 ===== */
+function setBusy(busy) {
+  $('submit-btn').disabled = busy;
+  $('tab-text').disabled = busy;
+  $('tab-image').disabled = busy;
+  $('q-res').disabled = busy;
+}
+function submitJob() {
+  setInputError('');
+  var body;
+  if (inputType === 'TEXT') {
+    var text = $('q-text').value.trim();
+    if (!text) { setInputError('题目内容不能为空'); return; }
+    body = { inputType: 'TEXT', text: text, resolution: $('q-res').value };
+  } else {
+    if (!imageBase64) { setInputError('请先选择或拖入题目图片'); return; }
+    body = { inputType: 'IMAGE', imageBase64: imageBase64, resolution: $('q-res').value };
+  }
+  setBusy(true);
+  fetch(API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(function (r) {
+    return r.json().catch(function () { return {}; }).then(function (data) { return { status: r.status, data: data }; });
+  }).then(function (res) {
+    if (res.status === 202 && res.data && res.data.jobId) {
+      attach(res.data.jobId);
+    } else {
+      setBusy(false);
+      setInputError((res.data && res.data.error) ? ('提交被拒绝：' + res.data.error) : ('提交失败（HTTP ' + res.status + '）'));
+    }
+  }).catch(function (e) {
+    setBusy(false);
+    setInputError('网络错误：' + e.message);
+  });
+}
+
+/* ===== 区 2：进度（attach / 轮询 / 渲染 / 取消） ===== */
+function attach(id) {
+  stopTimers();
+  jobId = id;
+  job = null;
+  location.hash = '/' + id;
+  $('job-id-label').textContent = '任务 ' + id;
+  $('input-error').hidden = true;
+  $('fail-panel').hidden = true;
+  $('fail-tbody').innerHTML = '';
+  $('cancel-msg').hidden = true;
+  $('poll-msg').hidden = true;
+  resetPlayer();
+  $('video-meta').textContent = '';
+  $('player-section').hidden = true;
+  $('progress-section').hidden = false;
+  renderChecklist({ status: 'QUEUED', stageHistory: [] });
+  setBar(0);
+  $('stage-label').textContent = STAGE_ZH.QUEUED;
+  $('elapsed-label').textContent = '已用时 0:00';
+  $('job-meta').textContent = '';
+  setBusy(true);
+  tickTimer = setInterval(tick, 1000);
+  poll();
+}
+function stopTimers() {
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+}
+function schedulePoll() { pollTimer = setTimeout(poll, POLL_MS); }
+function poll() {
+  if (!jobId) return;
+  fetch(API + '/' + encodeURIComponent(jobId)).then(function (r) {
+    if (r.status === 404) {
+      stopTimers();
+      $('poll-msg').textContent = '任务不存在（编号可能有误或已被清理），请返回重新提交';
+      $('poll-msg').hidden = false;
+      setBusy(false);
+      return null;
+    }
+    return r.json().then(function (v) { return { ok: r.ok, v: v }; });
+  }).then(function (res) {
+    if (!res) return;
+    if (!res.ok || !res.v || !res.v.status) { schedulePoll(); return; } /* 瞬时故障：继续轮询 */
+    job = res.v;
+    renderProgress(job);
+    if (TERMINAL.indexOf(job.status) >= 0) finish(job);
+    else schedulePoll();
+  }).catch(function () { schedulePoll(); }); /* 网络抖动：继续轮询 */
+}
+function setBar(pct) {
+  $('bar').style.width = pct + '%';
+  $('bar-label').textContent = pct + '%';
+}
+function startedAt(v) {
+  var t = v && v.createdAt ? Date.parse(v.createdAt) : NaN;
+  return isFinite(t) ? t : NaN;
+}
+function tick() {
+  if (!job) return;
+  var t0 = startedAt(job);
+  if (isFinite(t0)) $('elapsed-label').textContent = '已用时 ' + fmtDur(Date.now() - t0);
+}
+function fmtDur(ms) {
+  if (!isFinite(ms)) return '—';
+  var s = Math.max(0, Math.floor(ms / 1000));
+  var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  var p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return h > 0 ? (h + ':' + p(m) + ':' + p(sec)) : (m + ':' + p(sec));
+}
+/* 终局（FAILED/CANCELLED）时以最后一次 ENTER 阶段回推清单相位 */
+function activeIndex(v) {
+  if (ACTIVE[v.status] !== undefined) return ACTIVE[v.status];
+  var hist = v.stageHistory || [];
+  for (var i = hist.length - 1; i >= 0; i--) {
+    var st = hist[i];
+    if (st && st.state === 'ENTER' && ACTIVE[st.stage] !== undefined) return ACTIVE[st.stage];
+  }
+  return -1;
+}
+function renderProgress(v) {
+  /* 加权进度条：FAILED/CANCELLED 不在刻度表内 → 保持不动 */
+  var pct = PROGRESS[v.status];
+  if (pct !== undefined) setBar(pct);
+  $('stage-label').textContent = STAGE_ZH[v.status] || v.status;
+  tick();
+  var meta = [];
+  if (v.inputType) meta.push(v.inputType === 'TEXT' ? '文字题' : '图片题');
+  if (v.resolution) meta.push(v.resolution);
+  if (v.aspect) meta.push('画幅 ' + v.aspect);
+  if (v.voice) meta.push('音色 ' + v.voice);
+  $('job-meta').textContent = meta.join(' · ');
+  renderChecklist(v);
+  renderRetries(v);
+  /* 取消按钮：仅可取消窗口显示；SPEAKING 窗口本就 409 故不显示 */
+  var showCancel = CANCELLABLE.indexOf(v.status) >= 0;
+  $('cancel-btn').hidden = !showCancel;
+  $('cancel-tag').hidden = !(v.cancelRequested && !showCancel && TERMINAL.indexOf(v.status) < 0);
+  if (!v.cancelRequested) $('cancel-msg').hidden = true;
+}
+function renderChecklist(v) {
+  var active = activeIndex(v);
+  var dead = v.status === 'FAILED' || v.status === 'CANCELLED';
+  var ul = $('stage-list');
+  ul.innerHTML = '';
+  PHASES.forEach(function (ph, i) {
+    var li = document.createElement('li');
+    var sym = '○', cls = '', note = '';
+    if (v.status === 'DONE' || i < active) { sym = '✓'; cls = 'done'; }
+    else if (i === active) {
+      if (dead) { sym = '✗'; cls = 'interrupt'; }
+      else { sym = '⟳'; cls = 'active'; }
+    }
+    if (ph.key === 'GENERATING' && v.status === 'REVIEWING') note = '（校验/驳回回环中）';
+    var s1 = document.createElement('span');
+    s1.className = 'sym';
+    s1.textContent = sym;
+    li.appendChild(s1);
+    li.appendChild(document.createTextNode(ph.label));
+    if (note) {
+      var n = document.createElement('span');
+      n.className = 'note';
+      n.textContent = note;
+      li.appendChild(n);
+    }
+    if (cls) li.className = cls;
+    ul.appendChild(li);
+  });
+}
+function renderRetries(v) {
+  var lines = [];
+  if (v.extractRetries > 0) lines.push('审题第 ' + v.extractRetries + ' 轮重试/回环中');
+  if (v.genRetries > 0) lines.push('生成第 ' + v.genRetries + ' 轮重试/回环中');
+  if (v.qaRounds > 0) lines.push('审帧第 ' + v.qaRounds + ' 轮重试/回环中');
+  var box = $('retry-box');
+  box.innerHTML = '';
+  if (lines.length) {
+    lines.forEach(function (t) {
+      var d = document.createElement('div');
+      d.textContent = '⚠ ' + t;
+      box.appendChild(d);
+    });
+    box.hidden = false;
+  } else {
+    box.hidden = true;
+  }
+}
+function cancelJob() {
+  $('cancel-msg').hidden = true;
+  fetch(API + '/' + encodeURIComponent(jobId), { method: 'DELETE' }).then(function (r) {
+    if (r.status === 202) {
+      $('cancel-msg').textContent = '取消已受理，取消中，等终态…';
+      $('cancel-msg').hidden = false;
+    } else if (r.status === 409) {
+      $('cancel-msg').textContent = '当前阶段（配音合成起）不可取消，任务将继续至终态';
+      $('cancel-msg').hidden = false;
+    } else if (r.status === 200) {
+      $('cancel-msg').textContent = '任务已处于终态，无需取消';
+      $('cancel-msg').hidden = false;
+    } else {
+      $('cancel-msg').textContent = '取消失败（HTTP ' + r.status + '）';
+      $('cancel-msg').hidden = false;
+    }
+  }).catch(function (e) {
+    $('cancel-msg').textContent = '网络错误：' + e.message;
+    $('cancel-msg').hidden = false;
+  });
+}
+
+/* ===== 终态：DONE → 播放；FAILED/CANCELLED → 失败面板 ===== */
+function finish(v) {
+  stopTimers();
+  $('cancel-btn').hidden = true;
+  $('cancel-tag').hidden = true;
+  setBusy(false); /* 终态即不在进行中，允许提交下一单 */
+  if (v.status === 'DONE') {
+    renderPlayer(v);
+  } else {
+    renderFailure(v);
+  }
+}
+function renderPlayer(v) {
+  /* 仅 DONE 才给 video 赋 src（非 DONE 服务端 404 门禁，不打无效请求） */
+  var vid = $('player');
+  vid.src = API + '/' + encodeURIComponent(jobId) + '/video';
+  vid.hidden = false;
+  var t0 = startedAt(v), t1 = v.updatedAt ? Date.parse(v.updatedAt) : NaN;
+  var total = (isFinite(t0) && isFinite(t1)) ? fmtDur(t1 - t0) : '—';
+  $('video-meta').textContent = '总耗时 ' + total + (v.resolution ? (' · 分辨率 ' + v.resolution) : '') + (v.aspect ? (' · 画幅 ' + v.aspect) : '');
+  $('player-section').hidden = false;
+}
+function renderFailure(v) {
+  var dead = v.status === 'FAILED';
+  $('fail-title').textContent = dead ? '任务失败' : '任务已取消';
+  var msg = v.lastError || v.errorMessage;
+  $('fail-error').textContent = msg ? (dead ? '失败原因：' : '取消说明：') + msg : '（无错误信息）';
+  $('fail-panel').hidden = false;
+  $('fail-table-wrap').hidden = false;
+  fetch(API + '/' + encodeURIComponent(jobId) + '/review-errors').then(function (r) {
+    return r.ok ? r.json() : [];
+  }).then(function (list) {
+    var tbody = $('fail-tbody');
+    tbody.innerHTML = '';
+    if (!list || !list.length) {
+      $('fail-table-wrap').hidden = true;
+      return;
+    }
+    list.forEach(function (e) {
+      var tr = document.createElement('tr');
+      [e.round, e.source, e.reason].forEach(function (val) {
+        var td = document.createElement('td');
+        td.textContent = (val === null || val === undefined) ? '' : String(val);
+        if (td.textContent.length > 3 && val === e.reason) td.className = 'reason';
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+  }).catch(function () { $('fail-table-wrap').hidden = true; });
+}
+/* 再提一单：回输入区，保留原输入（文本/图片均不清空） */
+function again() {
+  stopTimers();
+  jobId = null;
+  job = null;
+  if (location.hash) history.replaceState(null, '', location.pathname);
+  $('progress-section').hidden = true;
+  $('player-section').hidden = true;
+  resetPlayer();
+  $('fail-panel').hidden = true;
+  setBusy(false);
+  window.scrollTo(0, 0);
+}
+/* 清空播放器：摘掉 src 并 load() 释放缓冲，杜绝任何残留视频请求 */
+function resetPlayer() {
+  var vid = $('player');
+  vid.removeAttribute('src');
+  vid.load();
+  vid.hidden = true;
+}
+
+/* ===== 事件绑定与 hash 恢复 ===== */
+$('tab-text').addEventListener('click', function () { switchTab('TEXT'); });
+$('tab-image').addEventListener('click', function () { switchTab('IMAGE'); });
+$('submit-btn').addEventListener('click', submitJob);
+$('cancel-btn').addEventListener('click', cancelJob);
+$('again-btn').addEventListener('click', again);
+$('img-clear').addEventListener('click', clearImage);
+$('q-image').addEventListener('change', function (e) { handleFile(e.target.files && e.target.files[0]); });
+var dz = $('drop-zone');
+dz.addEventListener('click', function () { $('q-image').click(); });
+dz.addEventListener('dragover', function (e) { e.preventDefault(); dz.className = 'over'; });
+dz.addEventListener('dragleave', function () { dz.className = ''; });
+dz.addEventListener('drop', function (e) {
+  e.preventDefault();
+  dz.className = '';
+  var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  handleFile(f);
+});
+
+(function restore() {
+  var m = location.hash.match(/^#\/(.+)$/);
+  if (m && m[1]) attach(decodeURIComponent(m[1]));
+})();
+</script>
+</body>
+</html>
