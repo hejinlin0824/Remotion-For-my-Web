@@ -172,15 +172,26 @@
 
 <script>
 'use strict';
-/* ===== 常量：端点 / 状态机 / 加权进度（按 run-3 实测健康路径耗时占比） ===== */
+/* ===== 常量：端点 / 状态机 / 段区间进度（T26 用户验收反馈 2026-09-01：旧累计刻度 RENDERING=100%，
+   渲染一进就满格而实测渲染 ~16min 占全程一半，严重失真 → 改段区间 + 段内渐进） ===== */
 var API = '/api/v1/jobs';
 var POLL_MS = 3000;
 var MAX_IMG_BYTES = 10 * 1024 * 1024;
 var TERMINAL = ['DONE', 'FAILED', 'CANCELLED'];
 /* 可取消窗口（SPEAKING 起不可取消，故 SPEAKING 不显示取消按钮） */
 var CANCELLABLE = ['QUEUED', 'EXTRACTING', 'GENERATING', 'REVIEWING', 'QA', 'RENDERING'];
-/* 阶段累计刻度：EXTRACTING 1% → GENERATING/REVIEWING 33% → SPEAKING 42% → QA 48% → RENDERING 100% */
-var PROGRESS = { QUEUED: 0, EXTRACTING: 1, GENERATING: 33, REVIEWING: 33, SPEAKING: 42, QA: 48, RENDERING: 100, DONE: 100 };
+/* 各阶段进度区间（%）与典型时长（秒，run-3 实测校准）：
+   段内进度 = start + (end−start) × min(1, elapsedInStage/typical)；
+   DONE=100% 唯一满格；FAILED/CANCELLED 不在刻度表 → 进度条保持原值不动；
+   QA→GENERATING 驳回回环自然回退到生成段（不新增钳制，T25 评审 M-1 顺延语义不变）。 */
+var SEGMENTS = {
+  EXTRACTING: { start: 1,  end: 5,  typical: 15 },
+  GENERATING: { start: 5,  end: 30, typical: 360 },
+  REVIEWING:  { start: 30, end: 33, typical: 50 },
+  SPEAKING:   { start: 33, end: 42, typical: 180 },
+  QA:         { start: 42, end: 48, typical: 120 },
+  RENDERING:  { start: 48, end: 99, typical: 960 }
+};
 var STAGE_ZH = {
   QUEUED: '排队中', EXTRACTING: '审题（题目抽取）', GENERATING: '生成课件',
   REVIEWING: '审校 / 驳回回环', SPEAKING: '配音合成', QA: '审帧预审',
@@ -342,16 +353,43 @@ function poll() {
 }
 function setBar(pct) {
   $('bar').style.width = pct + '%';
-  $('bar-label').textContent = pct + '%';
+  $('bar-label').textContent = (Math.round(pct * 10) / 10) + '%';
 }
 function startedAt(v) {
   var t = v && v.createdAt ? Date.parse(v.createdAt) : NaN;
   return isFinite(t) ? t : NaN;
 }
+/* 当前阶段在 stageHistory 中最后一次 ENTER 的时刻（倒序找）；找不到 → NaN */
+function stageEnterAt(v) {
+  var hist = v.stageHistory || [];
+  for (var i = hist.length - 1; i >= 0; i--) {
+    var st = hist[i];
+    if (st && st.state === 'ENTER' && st.stage === v.status) {
+      var t = Date.parse(st.at);
+      return isFinite(t) ? t : NaN;
+    }
+  }
+  return NaN;
+}
+/* 段区间 + 段内渐进（T26）：elapsedInStage = now − 本阶段最后一次 ENTER 的 at，
+   找不到 ENTER 记录回退段起点（elapsed=0）；DONE=100% 唯一满格；
+   FAILED/CANCELLED 不在刻度表 → 返回 undefined（进度条保持原值不动）。 */
+function progressPct(v) {
+  if (!v) return undefined;
+  if (v.status === 'DONE') return 100;
+  var seg = SEGMENTS[v.status];
+  if (!seg) return undefined;
+  var at = stageEnterAt(v);
+  var elapsedSec = isFinite(at) ? Math.max(0, (Date.now() - at) / 1000) : 0;
+  var ratio = Math.min(1, elapsedSec / seg.typical);
+  return seg.start + (seg.end - seg.start) * ratio;
+}
 function tick() {
   if (!job) return;
   var t0 = startedAt(job);
   if (isFinite(t0)) $('elapsed-label').textContent = '已用时 ' + fmtDur(Date.now() - t0);
+  var pct = progressPct(job);   /* 段内渐进随秒针推进（3s 轮询之外的补间，CSS transition 平滑照旧） */
+  if (pct !== undefined) setBar(pct);
 }
 function fmtDur(ms) {
   if (!isFinite(ms)) return '—';
@@ -371,8 +409,8 @@ function activeIndex(v) {
   return -1;
 }
 function renderProgress(v) {
-  /* 加权进度条：FAILED/CANCELLED 不在刻度表内 → 保持不动 */
-  var pct = PROGRESS[v.status];
+  /* 段区间 + 段内渐进进度条（T26）：FAILED/CANCELLED 不在刻度表内 → 保持不动 */
+  var pct = progressPct(v);
   if (pct !== undefined) setBar(pct);
   $('stage-label').textContent = STAGE_ZH[v.status] || v.status;
   tick();
