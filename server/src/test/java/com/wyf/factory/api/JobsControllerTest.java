@@ -8,6 +8,7 @@ import com.wyf.factory.domain.Job;
 import com.wyf.factory.domain.JobReviewError;
 import com.wyf.factory.domain.JobStatus;
 import com.wyf.factory.domain.StageHistoryEntry;
+import com.wyf.factory.pipeline.JobOrchestrator;
 import com.wyf.factory.repo.JobRepository;
 import com.wyf.factory.repo.JobReviewErrorRepository;
 import org.junit.jupiter.api.DisplayName;
@@ -38,6 +39,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -518,6 +520,114 @@ class JobsControllerTest {
                 .andExpect(jsonPath("$.error").value("job not found"));
     }
 
+    // ---------------------------------------------------------------- POST /api/v1/jobs/{id}/confirm
+
+    @Test
+    @DisplayName("confirm（T27）：AWAITING_CONFIRM → 202 {jobId} 异步续跑")
+    void confirm_awaiting_returns202() throws Exception {
+        when(service.confirm("j1")).thenReturn(JobOrchestrator.ConfirmResult.ACCEPTED);
+
+        mockMvc.perform(post("/api/v1/jobs/j1/confirm"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.jobId").value("j1"));
+    }
+
+    @Test
+    @DisplayName("confirm（T27）：非 AWAITING_CONFIRM → 409 {error}")
+    void confirm_notAwaiting_returns409() throws Exception {
+        when(service.confirm("j1")).thenReturn(JobOrchestrator.ConfirmResult.NOT_AWAITING_CONFIRM);
+
+        mockMvc.perform(post("/api/v1/jobs/j1/confirm"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").isNotEmpty());
+    }
+
+    @Test
+    @DisplayName("confirm（T27）：任务不存在 → 404 {error:'job not found'}")
+    void confirm_missing_returns404() throws Exception {
+        when(service.confirm("nope")).thenReturn(JobOrchestrator.ConfirmResult.NOT_FOUND);
+
+        mockMvc.perform(post("/api/v1/jobs/nope/confirm"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("job not found"));
+    }
+
+    // ---------------------------------------------------------------- POST /api/v1/jobs/{id}/revise
+
+    @Test
+    @DisplayName("revise（T27）：AWAITING_CONFIRM + 合法 text → 202，text 原样透传 service")
+    void revise_valid_returns202() throws Exception {
+        when(service.revise(eq("j1"), eq(" 修改后的题目 "))).thenReturn(JobOrchestrator.ReviseResult.ACCEPTED);
+
+        mockMvc.perform(post("/api/v1/jobs/j1/revise")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"text\":\" 修改后的题目 \"}"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.jobId").value("j1"));
+
+        verify(service).revise("j1", " 修改后的题目 ");   // 载荷原样透传（截断/清洗在决策层不做）
+    }
+
+    @Test
+    @DisplayName("revise（T27）：text 缺失/空白 → 400 {error}，不触 service")
+    void revise_blankText_returns400() throws Exception {
+        mockMvc.perform(post("/api/v1/jobs/j1/revise")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"text\":\"   \"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").isNotEmpty());
+        verifyNoInteractions(service);
+
+        mockMvc.perform(post("/api/v1/jobs/j1/revise")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isBadRequest());
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    @DisplayName("revise（T27）：text 超 2000 码点 → 400 {error}，不触 service")
+    void revise_overlongText_returns400() throws Exception {
+        String tooLong = "题".repeat(2001);
+
+        mockMvc.perform(post("/api/v1/jobs/j1/revise")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"text\":\"" + tooLong + "\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("2000")));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    @DisplayName("revise（T27）：非 AWAITING_CONFIRM → 409；达修改上限 → 409 {error 提上限}")
+    void revise_stateMatrix_409s() throws Exception {
+        when(service.revise(eq("j1"), any())).thenReturn(JobOrchestrator.ReviseResult.NOT_AWAITING_CONFIRM);
+        mockMvc.perform(post("/api/v1/jobs/j1/revise")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"text\":\"x\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").isNotEmpty());
+
+        when(service.revise(eq("j1"), any())).thenReturn(JobOrchestrator.ReviseResult.LIMIT_EXCEEDED);
+        mockMvc.perform(post("/api/v1/jobs/j1/revise")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"text\":\"x\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("上限")));
+    }
+
+    @Test
+    @DisplayName("revise（T27）：任务不存在 → 404 {error:'job not found'}")
+    void revise_missing_returns404() throws Exception {
+        when(service.revise(eq("nope"), any())).thenReturn(JobOrchestrator.ReviseResult.NOT_FOUND);
+
+        mockMvc.perform(post("/api/v1/jobs/nope/revise")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"text\":\"x\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("job not found"));
+    }
+
     // ---------------------------------------------------------------- 兜底异常
 
     @Test
@@ -551,8 +661,35 @@ class JobsControllerTest {
 
         private final JobRepository repo = mock(JobRepository.class);
         private final JobReviewErrorRepository reviewErrorRepo = mock(JobReviewErrorRepository.class);
+        private final JobOrchestrator orchestrator = mock(JobOrchestrator.class);
         private final AppProperties props = new AppProperties();
-        private final JobService realService = new JobService(repo, reviewErrorRepo, props);
+        private final JobService realService = new JobService(repo, reviewErrorRepo, orchestrator, props);
+
+        @Test
+        @DisplayName("T27：confirm/revise 薄委托编排器（决策+驱动单源在 JobOrchestrator），结果码透传")
+        void confirmAndRevise_delegateToOrchestrator() {
+            when(orchestrator.confirmAwaiting("j1")).thenReturn(JobOrchestrator.ConfirmResult.ACCEPTED);
+            when(orchestrator.reviseAwaiting("j1", "新题目")).thenReturn(JobOrchestrator.ReviseResult.LIMIT_EXCEEDED);
+
+            assertThat(realService.confirm("j1")).isEqualTo(JobOrchestrator.ConfirmResult.ACCEPTED);
+            assertThat(realService.revise("j1", "新题目")).isEqualTo(JobOrchestrator.ReviseResult.LIMIT_EXCEEDED);
+        }
+
+        @Test
+        @DisplayName("T27：cancel AWAITING_CONFIRM → 直接 CANCELLED 终态落库 ACCEPTED（待确认态无 worker 收割标记，必须就地终态而非置位悬挂）")
+        void cancel_awaitingConfirm_transitionsDirectlyToCancelled() {
+            Job job = new Job();
+            job.setInputType("IMAGE");
+            job.setStatus(JobStatus.AWAITING_CONFIRM);
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+            when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            assertThat(realService.cancel(job.getId())).isEqualTo(JobService.CancelResult.ACCEPTED);
+
+            ArgumentCaptor<Job> captor = ArgumentCaptor.forClass(Job.class);
+            verify(repo).save(captor.capture());
+            assertThat(captor.getValue().getStatus()).isEqualTo(JobStatus.CANCELLED);
+        }
 
         @Test
         @DisplayName("create TEXT：落缺省 aspect=16:9 / voice=Cherry / resolution=1080p，id 为 UUID，artifactsDir 指向产物目录")

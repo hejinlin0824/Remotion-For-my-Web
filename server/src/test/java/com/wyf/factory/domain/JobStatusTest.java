@@ -13,14 +13,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class JobStatusTest {
 
     /**
-     * 合法迁移对全集（spec §11 + 计划 Task 2 + T10 修复轮 M2 + Ruling-17 + Ruling-18）：
-     * 全表 10×10 中仅这 22 对为 true。
+     * 合法迁移对全集（spec §11 + 计划 Task 2 + T10 修复轮 M2 + Ruling-17 + Ruling-18 + T27）：
+     * 全表 11×11 中仅这 27 对为 true。T27 新增：EXTRACTING→AWAITING_CONFIRM（识图确认闸，
+     * 识图真题停驻等用户）与 AWAITING_CONFIRM→GENERATING（确认）/→EXTRACTING（修改重审）/
+     * →FAILED（废题）/→CANCELLED（取消）。
      */
     private static final Set<List<JobStatus>> LEGAL = Set.of(
             // 正向链 QUEUED→EXTRACTING→GENERATING→REVIEWING→SPEAKING→QA→RENDERING→DONE
             //（Ruling-18：QA 前置为 still 预审，渲染只走一次——渲染成功即 DONE，渲染后无 QA 轮）
             List.of(JobStatus.QUEUED, JobStatus.EXTRACTING),
             List.of(JobStatus.EXTRACTING, JobStatus.GENERATING),
+            // T27 确认闸：EXTRACTING 识图真题 → AWAITING_CONFIRM 停驻等用户三选一
+            List.of(JobStatus.EXTRACTING, JobStatus.AWAITING_CONFIRM),
             List.of(JobStatus.GENERATING, JobStatus.REVIEWING),
             List.of(JobStatus.REVIEWING, JobStatus.SPEAKING),
             List.of(JobStatus.SPEAKING, JobStatus.QA),
@@ -29,6 +33,9 @@ class JobStatusTest {
             // 回退：REVIEWING 驳回 / Ruling-17 QA 判负 → 带清单回生成重做（QA→RENDERING 复用为预审通过的正向对）
             List.of(JobStatus.QA, JobStatus.GENERATING),
             List.of(JobStatus.REVIEWING, JobStatus.GENERATING),
+            // T27 确认闸三选一：确认→GENERATING / 修改→EXTRACTING 重审（转 TEXT，非废题直接 GENERATING 不再过闸）
+            List.of(JobStatus.AWAITING_CONFIRM, JobStatus.GENERATING),
+            List.of(JobStatus.AWAITING_CONFIRM, JobStatus.EXTRACTING),
             // 终态迁移：任意非终态 → FAILED
             List.of(JobStatus.QUEUED, JobStatus.FAILED),
             List.of(JobStatus.EXTRACTING, JobStatus.FAILED),
@@ -37,6 +44,7 @@ class JobStatusTest {
             List.of(JobStatus.SPEAKING, JobStatus.FAILED),
             List.of(JobStatus.RENDERING, JobStatus.FAILED),
             List.of(JobStatus.QA, JobStatus.FAILED),
+            List.of(JobStatus.AWAITING_CONFIRM, JobStatus.FAILED),   // T27：废题重审判死
             // 取消：SPEAKING 起不可取消（spec §11 取消语义）；
             // RENDERING/QA→CANCELLED 为 T10 修复轮 M2（阶段完成检查点可取消，成片丢弃）
             List.of(JobStatus.QUEUED, JobStatus.CANCELLED),
@@ -44,12 +52,13 @@ class JobStatusTest {
             List.of(JobStatus.GENERATING, JobStatus.CANCELLED),
             List.of(JobStatus.REVIEWING, JobStatus.CANCELLED),
             List.of(JobStatus.RENDERING, JobStatus.CANCELLED),
-            List.of(JobStatus.QA, JobStatus.CANCELLED));
+            List.of(JobStatus.QA, JobStatus.CANCELLED),
+            List.of(JobStatus.AWAITING_CONFIRM, JobStatus.CANCELLED));   // T27：待确认态可取消
 
     @Test
-    @DisplayName("10×10 迁移全表：合法 22 对为 true，其余 78 对一律 false")
+    @DisplayName("11×11 迁移全表：合法 27 对为 true，其余 94 对一律 false")
     void canTransit_fullMatrix_onlyLegalPairsPass() {
-        assertThat(JobStatus.values()).hasSize(10);
+        assertThat(JobStatus.values()).hasSize(11);
 
         int legalCount = 0;
         for (JobStatus from : JobStatus.values()) {
@@ -78,6 +87,22 @@ class JobStatusTest {
         // 既有保留
         assertThat(JobStatus.canTransit(JobStatus.QA, JobStatus.RENDERING)).isTrue();
         assertThat(JobStatus.canTransit(JobStatus.QA, JobStatus.GENERATING)).isTrue();
+    }
+
+    @Test
+    @DisplayName("T27 确认闸：EXTRACTING→AWAITING_CONFIRM 与 AWAITING_CONFIRM 三选一（确认/修改/取消）+ 废题 FAILED 全为合法对；AWAITING_CONFIRM 不直通 DONE/SPEAKING")
+    void canTransit_t27_awaitingConfirmGatePairs() {
+        assertThat(JobStatus.canTransit(JobStatus.EXTRACTING, JobStatus.AWAITING_CONFIRM)).isTrue();
+        assertThat(JobStatus.canTransit(JobStatus.AWAITING_CONFIRM, JobStatus.GENERATING)).isTrue();
+        assertThat(JobStatus.canTransit(JobStatus.AWAITING_CONFIRM, JobStatus.EXTRACTING)).isTrue();
+        assertThat(JobStatus.canTransit(JobStatus.AWAITING_CONFIRM, JobStatus.FAILED)).isTrue();
+        assertThat(JobStatus.canTransit(JobStatus.AWAITING_CONFIRM, JobStatus.CANCELLED)).isTrue();
+        // 负例：待确认态不得跳过重审/生成直达下游
+        assertThat(JobStatus.canTransit(JobStatus.AWAITING_CONFIRM, JobStatus.DONE)).isFalse();
+        assertThat(JobStatus.canTransit(JobStatus.AWAITING_CONFIRM, JobStatus.REVIEWING)).isFalse();
+        assertThat(JobStatus.canTransit(JobStatus.AWAITING_CONFIRM, JobStatus.SPEAKING)).isFalse();
+        assertThat(JobStatus.canTransit(JobStatus.AWAITING_CONFIRM, JobStatus.RENDERING)).isFalse();
+        assertThat(JobStatus.canTransit(JobStatus.AWAITING_CONFIRM, JobStatus.AWAITING_CONFIRM)).isFalse();
     }
 
     @Test

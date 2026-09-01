@@ -102,6 +102,54 @@ class ExtractStationTest {
     }
 
     @Test
+    @DisplayName("T27 废题判定：{\"notQuestion\":true,\"reason\":...} → FatalExtractException，消息=「上传/输入内容不是数学题目：<reason>」，不烧重试预算")
+    void notQuestion_fatalExtractExceptionWithReason() {
+        when(glm.chat(Prompts.EXTRACT, "帮我写一篇作文")).thenReturn(
+                "{\"notQuestion\": true, \"reason\": \"输入是作文要求，不是数学题目\"}");
+
+        assertThatThrownBy(() -> station.extract("帮我写一篇作文"))
+                .isInstanceOf(ExtractStation.FatalExtractException.class)
+                .hasMessageContaining("上传/输入内容不是数学题目")
+                .hasMessageContaining("输入是作文要求，不是数学题目")
+                .isNotInstanceOf(GlmException.class);
+    }
+
+    @Test
+    @DisplayName("T27 废题判定（IMAGE 通道同规则）：视觉通道返回 notQuestion → 同样 FatalExtractException")
+    void notQuestion_imageChannelSameRule() {
+        when(glm.chatWithImage(Prompts.EXTRACT, "QUJD", "image/png")).thenReturn(
+                "{\"notQuestion\": true, \"reason\": \"无关图片，未见数学题\"}");
+
+        assertThatThrownBy(() -> station.extractImage("QUJD", "image/png"))
+                .isInstanceOf(ExtractStation.FatalExtractException.class)
+                .hasMessageContaining("不是数学题目")
+                .hasMessageContaining("无关图片");
+    }
+
+    @Test
+    @DisplayName("T27 废题判定：reason 缺失/空白 → 兜底「未说明原因」，仍是 Fatal 不重试")
+    void notQuestion_missingReason_fallbackReason() {
+        when(glm.chat(Prompts.EXTRACT, TEXT_PAYLOAD)).thenReturn("{\"notQuestion\": true}");
+
+        assertThatThrownBy(() -> station.extract(TEXT_PAYLOAD))
+                .isInstanceOf(ExtractStation.FatalExtractException.class)
+                .hasMessageContaining("上传/输入内容不是数学题目")
+                .hasMessageContaining("未说明原因");
+    }
+
+    @Test
+    @DisplayName("T27 废题判定：notQuestion=false 或缺省 → 按既有形状正常解析（不误杀真题）")
+    void notQuestionFalse_parsesNormally() {
+        when(glm.chat(Prompts.EXTRACT, TEXT_PAYLOAD)).thenReturn(
+                "{\"notQuestion\": false, \"problemType\":\"计算题\",\"lines\":[{\"id\":\"L1\",\"segments\":[{\"type\":\"text\",\"value\":\"求\"}]}]}");
+
+        ExtractResult result = station.extract(TEXT_PAYLOAD);
+
+        assertThat(result.problemType()).isEqualTo("计算题");
+        assertThat(result.lines()).hasSize(1);
+    }
+
+    @Test
     @DisplayName("非 JSON 文本 → GlmException(retryable=true)，消息含原始响应")
     void nonJson_retryableGlmException() {
         when(glm.chat(Prompts.EXTRACT, TEXT_PAYLOAD)).thenReturn("这不是JSON");

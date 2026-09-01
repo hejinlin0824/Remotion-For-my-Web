@@ -62,6 +62,12 @@ public class ExtractStation {
         if (root.path("error").isTextual()) {
             throw new FatalExtractException("审题失败：" + root.get("error").asText());
         }
+        // T27 废题判定（TEXT/IMAGE 两通道同规则）：模型判非数学题目 → 废题驳回（Fatal 通道，
+        // 不烧 extractRetries——同素材重试无意义）；reason 缺失兜底，绝不让空原因穿出
+        if (root.path("notQuestion").asBoolean(false)) {
+            String reason = root.path("reason").asText("").strip();
+            throw new FatalExtractException("上传/输入内容不是数学题目：" + (reason.isEmpty() ? "未说明原因" : reason));
+        }
         JsonNode problemType = root.path("problemType");
         JsonNode lines = root.path("lines");
         if (!problemType.isTextual() || !lines.isArray() || lines.isEmpty()) {

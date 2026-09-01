@@ -6,6 +6,7 @@ import com.wyf.factory.api.dto.ReviewErrorView;
 import com.wyf.factory.config.AppProperties;
 import com.wyf.factory.domain.Job;
 import com.wyf.factory.domain.JobStatus;
+import com.wyf.factory.pipeline.JobOrchestrator;
 import com.wyf.factory.repo.JobRepository;
 import com.wyf.factory.repo.JobReviewErrorRepository;
 import org.springframework.data.domain.Page;
@@ -22,6 +23,8 @@ import java.util.Optional;
 /**
  * REST 层对 Job 领域的薄封装（计划 Task 3）：入队 / 批量入队 / 查询 / 列表 / 取消 / 视频定位。
  * 校验（inputType/text/imageBase64/aspect/voice）在 Controller 层，这里只做业务判定与落库。
+ * T27：confirm/revise 薄委托 {@link JobOrchestrator}（状态迁移+墙钟+驱动单源在编排器）；
+ * cancel 对 AWAITING_CONFIRM 就地终态（挂起态无 worker 收割标记）。
  */
 @Service
 public class JobService {
@@ -31,11 +34,14 @@ public class JobService {
 
     private final JobRepository repo;
     private final JobReviewErrorRepository reviewErrorRepo;
+    private final JobOrchestrator orchestrator;
     private final AppProperties props;
 
-    public JobService(JobRepository repo, JobReviewErrorRepository reviewErrorRepo, AppProperties props) {
+    public JobService(JobRepository repo, JobReviewErrorRepository reviewErrorRepo,
+                      JobOrchestrator orchestrator, AppProperties props) {
         this.repo = repo;
         this.reviewErrorRepo = reviewErrorRepo;
+        this.orchestrator = orchestrator;
         this.props = props;
     }
 
@@ -125,6 +131,18 @@ public class JobService {
                         sleepBeforeCancelRetry();
                     }
                 }
+                case AWAITING_CONFIRM -> {
+                    // T27：挂起态没有 worker 在跑（无人收割 cancelRequested 标记），取消必须就地终态
+                    // AWAITING_CONFIRM→CANCELLED，否则标记置位后任务永久悬挂。撞锁重读重判（并发
+                    // confirm/revise 先到已续跑 → 按新状态走既有分支）
+                    try {
+                        job.enterStage(JobStatus.CANCELLED, "用户取消（待确认态）");
+                        repo.save(job);
+                        return CancelResult.ACCEPTED;
+                    } catch (ObjectOptimisticLockingFailureException raced) {
+                        sleepBeforeCancelRetry();
+                    }
+                }
                 case SPEAKING -> {
                     return CancelResult.NOT_CANCELLABLE;
                 }
@@ -143,6 +161,22 @@ public class JobService {
             Thread.currentThread().interrupt();
             throw new GlobalExceptionHandler.ApiException(503, "取消落库被中断，请重试");
         }
+    }
+
+    /**
+     * 确认识图结果（T27）：薄委托 {@link JobOrchestrator#confirmAwaiting}——状态迁移、
+     * 墙钟重落与「落库即重新驱动」单源在编排器，这里不做第二份判定。
+     */
+    public JobOrchestrator.ConfirmResult confirm(String id) {
+        return orchestrator.confirmAwaiting(id);
+    }
+
+    /**
+     * 修改识图结果重审（T27）：薄委托 {@link JobOrchestrator#reviseAwaiting}（库内转 TEXT、
+     * reviseCount 防刷、重审驱动单源在编排器）。
+     */
+    public JobOrchestrator.ReviseResult revise(String id, String text) {
+        return orchestrator.reviseAwaiting(id, text);
     }
 
     /**

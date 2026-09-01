@@ -34,3 +34,6 @@ app:
     wall-clock-deadline-minutes: 60   # T21：全局处理墙钟死线（首次进 EXTRACTING 落库 now+值；超线即 FAILED 作废，QUEUED 不计时，回环不刷新）
   cleanup:
     keep-tts-audio: true   # T22：DONE 后保留 TTS 行音频（移动到 artifacts/{jobId}/audio/lines/）；false=工作区整删不保留（旧行为）
+  pipeline:
+    extract-confirm: true  # T27：IMAGE 识图确认闸——识图真题停驻 AWAITING_CONFIRM 等用户确认/修改/取消；false=IMAGE 全自动（兼容既有行为）。TEXT 永不过闸
+    max-revise: 10         # T27：识图结果「修改重审」次数上限（防刷），超限 revise 请求 409 拒绝（不烧任务）

@@ -24,6 +24,29 @@ public class AppProperties {
     private final Qa qa = new Qa();
     private final Retry retry = new Retry();
     private final Cleanup cleanup = new Cleanup();
+    private final Pipeline pipeline = new Pipeline();
+
+    /**
+     * 流水线人机协作配置（T27 识图确认闸）。
+     */
+    public static class Pipeline {
+        /**
+         * IMAGE 识图确认闸（默认 true）：识图判为真题 → AWAITING_CONFIRM 停驻，等用户
+         * 确认（→GENERATING）/ 修改（转 TEXT 重审）/ 取消。false = IMAGE 也全自动
+         * （兼容既有行为）。TEXT 通道永不过闸（开关只管 IMAGE 闸）。
+         */
+        private boolean extractConfirm = true;
+        /**
+         * revise「修改重审」次数上限（防刷，默认 10）：AWAITING_CONFIRM 提交修改的累计
+         * 配额，达上限后 revise 请求 409 拒绝（不烧任务）。
+         */
+        private int maxRevise = 10;
+
+        public boolean isExtractConfirm() { return extractConfirm; }
+        public void setExtractConfirm(boolean extractConfirm) { this.extractConfirm = extractConfirm; }
+        public int getMaxRevise() { return maxRevise; }
+        public void setMaxRevise(int maxRevise) { this.maxRevise = maxRevise; }
+    }
 
     /** 存储清理配置（T22：DONE 后只保留视频 + TTS 资产，其余过程性内容清除） */
     public static class Cleanup {
@@ -134,4 +157,5 @@ public class AppProperties {
     public Qa getQa() { return qa; }
     public Retry getRetry() { return retry; }
     public Cleanup getCleanup() { return cleanup; }
+    public Pipeline getPipeline() { return pipeline; }
 }

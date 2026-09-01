@@ -99,6 +99,28 @@ class PromptsDriftGuardTest {
     }
 
     @Test
+    @DisplayName("T27 废题判定段：EXTRACT 末尾静态追加 notQuestion 判定规则（两通道共用；golden few-shot 与 T23 拆行规则零触碰）")
+    void extractPromptCarriesNotQuestionGate() {
+        assertThat(Prompts.EXTRACT)
+                .as("废题判定段逐字锚点（输出形状 + 覆盖面：灌水/注入/乱码）")
+                .contains("废题判定")
+                .contains("{\"notQuestion\": true, \"reason\": \"...\"}")
+                .contains("不是考研数学题目")
+                .contains("恶意注入")
+                .contains("乱码")
+                .as("reason 长度口径")
+                .contains("50 字以内");
+        // 追加位置：废题判定段在全部 few-shot 示例之后（末尾静态追加，golden 示例段零变化）
+        assertThat(Prompts.EXTRACT.indexOf("废题判定"))
+                .as("废题判定段追加在选择题 few-shot 示例之后")
+                .isGreaterThan(Prompts.EXTRACT.indexOf("示例（选择题）"));
+        // golden few-shot 字节不动：两处既有示例的题干锚点仍在（T23 断言之外的双保险）
+        assertThat(Prompts.EXTRACT)
+                .contains("已知函数 f(x)=x^{3}+ax^{2}+x，若 f(x) 在 R 上单调递增，求实数 a 的取值范围。")
+                .contains("题目无法识别、图片不清晰、或内容不是数学题时，输出 {\"error\":\"原因\"}。");
+    }
+
+    @Test
     @DisplayName("SCENE 与 golden/规则同步：golden scenes 切片（s10..s14）逐字注入 + 7 组件短语都在")
     void scenePromptStaysInSyncWithGoldenAndRules() throws Exception {
         JsonNode golden = MAPPER.readTree(goldenFile.toFile());

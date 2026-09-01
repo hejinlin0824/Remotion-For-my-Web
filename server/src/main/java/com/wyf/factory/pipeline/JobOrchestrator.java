@@ -67,6 +67,15 @@ import java.util.function.IntConsumer;
  *       ExtractResult 不可恢复时 V2 以 content.json problem 段为基准（历史 note 记录）。</li>
  *   <li><b>取消</b>：每阶段开始前重读最新 Job 查 cancelRequested；SPEAKING 前可取消
  *       （enterStage CANCELLED + workspace 清理 + 不产 artifacts + 回调）；渲染中不打断（spec §11）。</li>
+ *   <li><b>识图确认闸</b>（T27，用户裁定 2026-09-01）：仅 IMAGE 且 app.pipeline.extract-confirm=true
+ *       时，EXTRACT 识图判为真题 → AWAITING_CONFIRM 停驻（extraction 结果已落盘
+ *       artifacts/{jobId}/extracted.json），等用户三选一：confirm → GENERATING 续跑 /
+ *       revise（提交修改文本）→ 库内转 TEXT 重审（{@link #reviseAwaiting}，非废题直接
+ *       GENERATING 不再过闸）/ cancel（既有 DELETE，服务层直接终态）。TEXT 通道永不过闸；
+ *       废题（notQuestion）在 EXTRACT 两通道同规则直接 FAILED 驳回。</li>
+ *   <li><b>AWAITING_CONFIRM 墙钟豁免</b>（T21 语义扩展）：进入挂起态清 processingDeadlineAt
+ *       （用户挂机不计入全局死线），confirm/revise 重新驱动时重落；sweep 与主循环检查点
+ *       均不判死挂起态；启动 sweep 跳过挂起态（不自动推进）。</li>
  *   <li><b>全局墙钟死线</b>（T21）：首次进入 EXTRACTING 落库 processingDeadlineAt = now + 配置值
  *       （默认 60min），绝对死线——此后 QUEUED 不计时、驳回回环不刷新（与 genDeadlineAt 的重进刷新
  *       刻意相反）、重启读回仍生效；检查点两处：主循环头部（每次阶段进入/转换）+ {@link #wallClockSweep()}
@@ -207,7 +216,8 @@ public class JobOrchestrator {
      * 全局墙钟 sweep（T21② 周期兜底，与 {@link #resumeInterrupted} 同款取任务面）：
      * 周期扫非终态任务，凡过 processingDeadlineAt 者重新提交推进——主循环头部的墙钟检查点
      * （T21①）读到过线即 failJob 判死（QUEUED 不计时、回环不刷新、重启读回仍生效；
-     * 停机期间过线的任务由此判死）。不与 {@link #resumeInterrupted} 合并：启动 sweep 一次性的，
+     * 停机期间过线的任务由此判死；T27 AWAITING_CONFIRM 恒不计时——挂起等用户不得判死）。
+     * 不与 {@link #resumeInterrupted} 合并：启动 sweep 一次性的，
      * 本 sweep 常驻兜底单长调用卡死/落库竞争等主循环无法自达的窗口。
      * 不在调度线程内直接落库/发回调（回调退避最长数十秒会阻塞共享调度线程，I3 同款纪律），
      * 交 jobExecutor 工作线程执行；提交面与既有 sweep 同一异常防护（逐任务 try、撞锁静默）。
@@ -242,8 +252,10 @@ public class JobOrchestrator {
                 List.of(JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELLED));
         int resumed = 0;
         for (Job job : unfinished) {
-            // QUEUED 留给 poll 领单（重复提交会双跑）；终态防御性跳过（查询本不该返回）
-            if (job.getStatus() == JobStatus.QUEUED || job.getStatus().isTerminal()) {
+            // QUEUED 留给 poll 领单（重复提交会双跑）；AWAITING_CONFIRM 等用户三选一（T27，
+            // confirm/revise 端点驱动，重启后仍停驻原态，死线 NULL 属合法待确认态）；终态防御性跳过
+            if (job.getStatus() == JobStatus.QUEUED || job.getStatus() == JobStatus.AWAITING_CONFIRM
+                    || job.getStatus().isTerminal()) {
                 continue;
             }
             log.info("job={} 启动续跑（status={}）", job.getId(), job.getStatus());
@@ -267,6 +279,109 @@ public class JobOrchestrator {
                 log.error("job={} 推进线程抛出未捕获异常", jobId, e);
             }
         });
+    }
+
+    // ------------------------------------------------------------------ 决策端点驱动（T27 确认闸）
+
+    /** T27 confirm 语义化结果（Controller 映射 202/404/409）。 */
+    public enum ConfirmResult { ACCEPTED, NOT_FOUND, NOT_AWAITING_CONFIRM }
+
+    /** T27 revise 语义化结果（Controller 映射 202/404/409；LIMIT_EXCEEDED=修改配额用尽）。 */
+    public enum ReviseResult { ACCEPTED, NOT_FOUND, NOT_AWAITING_CONFIRM, LIMIT_EXCEEDED }
+
+    /** 决策落库与 worker/sweep 竞态的重试上限与间隔（模式对齐 JobService CANCEL_SAVE_ATTEMPTS）。 */
+    static final int DECIDE_SAVE_ATTEMPTS = 5;
+    static final long DECIDE_RETRY_BACKOFF_MS = 20;
+
+    /**
+     * 用户「确认识图结果」（T27 三选一之一，POST /api/v1/jobs/{id}/confirm 的业务实现）：
+     * 仅 AWAITING_CONFIRM 可确认（否则 409 语义）；AWAITING_CONFIRM→GENERATING 落库后
+     * 立即重新提交驱动（挂起态无 worker 在跑，不重提交会永久卡住）——重启场景 ctx.extracted
+     * 内存缺失由 {@link #ensureExtracted} 从 artifacts/{jobId}/extracted.json 零成本重建。
+     * 全局墙钟死线在本方法重落（enterAwaitingConfirm 清空 → {@link #plantWallClockDeadlineIfAbsent}）。
+     *
+     * <p>并发：与 revise/cancel 同时到达走既有 @Version 乐观锁——撞锁重读按库内最新状态重判，
+     * 先到者成功、后到者状态已变返回 NOT_AWAITING_CONFIRM（409）；持续冲突（理论不可达）
+     * 同样按 409 收束并告警，绝不向上抛 500。</p>
+     */
+    public ConfirmResult confirmAwaiting(String jobId) {
+        for (int attempt = 0; attempt < DECIDE_SAVE_ATTEMPTS; attempt++) {
+            Optional<Job> found = repo.findById(jobId);
+            if (found.isEmpty()) {
+                return ConfirmResult.NOT_FOUND;
+            }
+            Job job = found.get();
+            if (job.getStatus() != JobStatus.AWAITING_CONFIRM) {
+                return ConfirmResult.NOT_AWAITING_CONFIRM;
+            }
+            try {
+                plantWallClockDeadlineIfAbsent(job);   // 挂起时已清空 → 此处重落（用户挂机不计入）
+                job.enterStage(JobStatus.GENERATING, "用户确认识图结果，继续生成");
+                repo.save(job);
+            } catch (ObjectOptimisticLockingFailureException raced) {
+                backoffBeforeDecideRetry();
+                continue;
+            }
+            log.info("job={} 用户确认识图结果 → GENERATING 续跑", jobId);
+            submit(jobId);   // 落库即驱动：异步（生产线程池）/同步（测试直跑执行器）
+            return ConfirmResult.ACCEPTED;
+        }
+        log.warn("job={} confirm 持续并发冲突未能落库，请重试", jobId);
+        return ConfirmResult.NOT_AWAITING_CONFIRM;
+    }
+
+    /**
+     * 用户「修改识图结果」（T27 三选一之二，POST /api/v1/jobs/{id}/revise 的业务实现，
+     * 用户裁定「修改后的文本=新 TEXT 输入，走文本流程」）：仅 AWAITING_CONFIRM 可修改；
+     * 库内转 TEXT（inputType=TEXT、inputText=新文本、imageBase64 释放）后 AWAITING_CONFIRM→
+     * EXTRACTING 重审——TEXT 通道永不过闸，非废题直接 GENERATING（不出第二张确认卡）、
+     * 废题走 Fatal 通道 FAILED。reviseCount+1 落库防刷（达 app.pipeline.max-revise 拒绝、
+     * 不烧任务）；不消耗 extractRetries（用户驱动 ≠ 系统重试）。
+     * 驱动与并发语义同 {@link #confirmAwaiting}。
+     */
+    public ReviseResult reviseAwaiting(String jobId, String text) {
+        for (int attempt = 0; attempt < DECIDE_SAVE_ATTEMPTS; attempt++) {
+            Optional<Job> found = repo.findById(jobId);
+            if (found.isEmpty()) {
+                return ReviseResult.NOT_FOUND;
+            }
+            Job job = found.get();
+            if (job.getStatus() != JobStatus.AWAITING_CONFIRM) {
+                return ReviseResult.NOT_AWAITING_CONFIRM;
+            }
+            if (job.getReviseCount() >= props.getPipeline().getMaxRevise()) {
+                log.warn("job={} revise 被拒：已达修改上限 {} 次（防刷，不烧任务）",
+                        jobId, props.getPipeline().getMaxRevise());
+                return ReviseResult.LIMIT_EXCEEDED;
+            }
+            try {
+                plantWallClockDeadlineIfAbsent(job);   // 挂起时已清空 → 重审重落死线
+                int round = job.getReviseCount() + 1;
+                job.enterStage(JobStatus.EXTRACTING, "用户提交修改，转文本重审（第 " + round + " 次修改）");
+                job.setInputType("TEXT");          // 修改后的文本 = 新 TEXT 输入（用户裁定 2）
+                job.setInputText(text);
+                job.setImageBase64(null);          // 释放图片载荷
+                job.setReviseCount(round);
+                repo.save(job);
+            } catch (ObjectOptimisticLockingFailureException raced) {
+                backoffBeforeDecideRetry();
+                continue;
+            }
+            log.info("job={} 修改重审（第 {} 次，上限 {}），新文本预览：{}", jobId,
+                    job.getReviseCount(), props.getPipeline().getMaxRevise(), truncateCodePoints(text.strip(), 60));
+            submit(jobId);
+            return ReviseResult.ACCEPTED;
+        }
+        log.warn("job={} revise 持续并发冲突未能落库，请重试", jobId);
+        return ReviseResult.NOT_AWAITING_CONFIRM;
+    }
+
+    private static void backoffBeforeDecideRetry() {
+        try {
+            Thread.sleep(DECIDE_RETRY_BACKOFF_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     // ------------------------------------------------------------------ 主流程
@@ -336,6 +451,12 @@ public class JobOrchestrator {
             switch (job.getStatus()) {
                 case QUEUED -> job = enterExtracting(job, "编排器接管（未经 poll 领单），开始审题");
                 case EXTRACTING -> job = doExtracting(job, ctx);
+                case AWAITING_CONFIRM -> {
+                    // T27 确认闸挂起态：编排器不自动推进——等端点 confirm/revise（{@link #confirmAwaiting}
+                    // /{@link #reviseAwaiting}）或取消（服务层直接终态）重新提交驱动；无挂起回调可发
+                    log.info("job={} 停驻 AWAITING_CONFIRM，等待用户确认/修改/取消", job.getId());
+                    return;
+                }
                 case GENERATING -> job = doGenerating(job, ctx);
                 case REVIEWING -> job = doReviewing(job, ctx);
                 case SPEAKING -> job = doSpeaking(job, ctx);
@@ -369,13 +490,57 @@ public class JobOrchestrator {
                     : extractStation.extract(job.getInputText()));
             ctx.extracted = extracted;
             persistExtractedQuietly(job.getId(), extracted);   // T26：识图结果落盘（尽力而为）
+            // T27 确认闸：仅 IMAGE 且开关开时停驻 AWAITING_CONFIRM 等用户三选一（TEXT 永不过闸；
+            // revise 重审走 TEXT 通道自然不再进闸）。落盘先于闸——extracted.json 是 confirm 续跑的重建源
+            if (confirmGateActive(job)) {
+                return enterAwaitingConfirm(job, "识图完成（" + extracted.problemType() + "），等待用户确认/修改/取消");
+            }
             return enterGenerating(job, "审题完成（" + extracted.problemType() + "）");
         } catch (ExtractStation.FatalExtractException fatal) {
-            // 读不出题/非数学题：同素材重试无意义（spec §9），直接判死
+            // 读不出题/非数学题（T27 含 notQuestion 废题判定）：同素材重试无意义（spec §9），直接判死。
+            // 驳回原因必记；题目文本只记前 60 字预览，base64 载荷/key 零打印
+            log.warn("job={} 废题驳回：{}（输入预览：{}）", job.getId(), fatal.getMessage(), inputPreview(job));
             return failJob(job, fatal.getMessage(), fatal, ctx);
         } catch (GlmException e) {
             return retryOrFail(job, e, "审题", job.getExtractRetries(), job::setExtractRetries, ctx);
         }
+    }
+
+    /** T27 确认闸生效条件：inputType=IMAGE 且 app.pipeline.extract-confirm=true（开关关=IMAGE 也全自动）。 */
+    private boolean confirmGateActive(Job job) {
+        return "IMAGE".equals(job.getInputType()) && props.getPipeline().isExtractConfirm();
+    }
+
+    /**
+     * （首次）进入 AWAITING_CONFIRM（T27）：识图真题停驻等用户三选一。挂起即清全局墙钟死线
+     * processingDeadlineAt——用户挂机不计入 60min 死线（confirm/revise 重新驱动时经
+     * {@link #plantWallClockDeadlineIfAbsent} 重落）；sweep/主循环检查点对挂起态不判死。
+     */
+    private Job enterAwaitingConfirm(Job job, String note) {
+        job.setProcessingDeadlineAt(null);
+        return enterAndSave(job, JobStatus.AWAITING_CONFIRM, note);
+    }
+
+    /** 驳回日志的输入预览（Global Constraint 4）：TEXT 只留前 60 字，IMAGE 只记「图片输入」字样，base64 载荷零打印。 */
+    private static String inputPreview(Job job) {
+        if ("IMAGE".equals(job.getInputType())) {
+            return "图片输入（base64 不落日志）";
+        }
+        String text = job.getInputText();
+        if (text == null) {
+            return "";
+        }
+        String stripped = text.strip();
+        return truncateCodePoints(stripped, 60);
+    }
+
+    /** 按码点截断（不劈开代理对），超长补省略号。 */
+    private static String truncateCodePoints(String s, int maxCodePoints) {
+        if (s.codePointCount(0, s.length()) <= maxCodePoints) {
+            return s;
+        }
+        int limit = s.offsetByCodePoints(0, maxCodePoints);
+        return s.substring(0, limit) + "…";
     }
 
     // ------------------------------------------------------------------ 全局墙钟死线（T21）
@@ -400,10 +565,12 @@ public class JobOrchestrator {
 
     /**
      * 全局墙钟过线判定（检查点共用）：非终态且死线已落库且 now &gt; 死线。QUEUED 恒否
-     * （裁定 2：排队延迟是容量问题，不计时——防御性显式排除，即使升级窗口旧行残留死线值）。
+     * （裁定 2：排队延迟是容量问题，不计时——防御性显式排除，即使升级窗口旧行残留死线值）；
+     * AWAITING_CONFIRM 恒否（T27：用户挂机不计时，挂起时死线已清——防御性显式排除旧行残留值）。
      */
     private boolean pastWallClockDeadline(Job job) {
-        if (job.getStatus() == JobStatus.QUEUED || job.getStatus().isTerminal()) {
+        if (job.getStatus() == JobStatus.QUEUED || job.getStatus() == JobStatus.AWAITING_CONFIRM
+                || job.getStatus().isTerminal()) {
             return false;
         }
         LocalDateTime deadline = job.getProcessingDeadlineAt();
@@ -465,9 +632,10 @@ public class JobOrchestrator {
      * 生成输入恢复（T19a 配套，ExtractResult 不落库的断点续跑补偿）：重启续跑进 GENERATING 时
      * ExtractResult 在内存里已丢——优先从盘上 content.json 的 problem 段零成本重建（同源题干，
      * 与 doReviewing 续跑同款取法）；盘上无 content.json（首轮生成中断/首轮驳回回环中断）则
-     * 题干在 Job 上，重新审题（异常路由与 doExtracting 同款：FatalExtract 判死、GlmException
-     * 走 extractRetries 预算）。修复前此场景生成载荷是字面 "null" 的盲跑。
-     * T26：两条重建路径（content.json 重建 / 重取审题）收敛后同步补写 extracted.json（幂等覆盖写）。
+     * 先试 artifacts/{jobId}/extracted.json 原样重建（T27 confirm 续跑主路径：T26 落盘即为此预留，
+     * 零 GLM 成本），仍无则题干在 Job 上重新审题（异常路由与 doExtracting 同款：FatalExtract
+     * 判死、GlmException 走 extractRetries 预算）。修复前此场景生成载荷是字面 "null" 的盲跑。
+     * T26：各重建路径收敛后同步补写 extracted.json（幂等覆盖写）。
      *
      * @return job 继续推进；null = 已判死/待重试落库，本阶段停止
      */
@@ -476,12 +644,19 @@ public class JobOrchestrator {
             return job;
         }
         try {
-            ctx.extracted = ctx.content != null
-                    ? extractedFromProblem(ctx.content)
-                    : semaphores.withGlm(() -> "IMAGE".equals(job.getInputType())
-                            ? extractStation.extractImage(imagePayload(job), IMAGE_MIME)
-                            : extractStation.extract(job.getInputText()));
+            if (ctx.content != null) {
+                ctx.extracted = extractedFromProblem(ctx.content);
+            } else {
+                // T27：confirm 续跑从 extracted.json 重建（缺失/损坏回退重取审题，不卡死）
+                ctx.extracted = extractedFromDisk(job.getId());
+            }
+            if (ctx.extracted == null) {
+                ctx.extracted = semaphores.withGlm(() -> "IMAGE".equals(job.getInputType())
+                        ? extractStation.extractImage(imagePayload(job), IMAGE_MIME)
+                        : extractStation.extract(job.getInputText()));
+            }
         } catch (ExtractStation.FatalExtractException fatal) {
+            log.warn("job={} 废题驳回：{}（输入预览：{}）", job.getId(), fatal.getMessage(), inputPreview(job));
             failJob(job, fatal.getMessage(), fatal, ctx);
             return null;
         } catch (GlmException e) {
@@ -489,6 +664,24 @@ public class JobOrchestrator {
         }
         persistExtractedQuietly(job.getId(), ctx.extracted);   // T26：续跑重建/重取同步补写（幂等覆盖写）
         return job;
+    }
+
+    /**
+     * T27：从 artifacts/{jobId}/extracted.json（T26 落盘）原样重建 ExtractResult——
+     * confirm 续跑路径的零成本输入。文件缺失/损坏返回 null（调用方回退重取审题），
+     * 尽力而为不抛（读盘故障面不外溢主流程）。
+     */
+    private ExtractResult extractedFromDisk(String jobId) {
+        Path file = artifactsExtracted(jobId);
+        if (!Files.isRegularFile(file)) {
+            return null;
+        }
+        try {
+            return EXTRACT_JSON.readValue(file.toFile(), ExtractResult.class);
+        } catch (IOException | RuntimeException e) {
+            log.warn("job={} extracted.json 重建失败（{}），回退重取审题：{}", jobId, file, e.getMessage());
+            return null;
+        }
     }
 
     /**

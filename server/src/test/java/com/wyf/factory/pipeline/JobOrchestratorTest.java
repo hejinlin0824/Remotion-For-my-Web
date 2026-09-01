@@ -1474,4 +1474,259 @@ class JobOrchestratorTest {
                 .contains("识图结果落盘失败").contains(JOB_ID));
         verify(callbackClient).notify(eq(CALLBACK_URL), any());   // 回调照发
     }
+
+    // ---- 25. T27：识图确认闸（IMAGE 过闸停驻 AWAITING_CONFIRM；TEXT 永不过闸） ----
+
+    /** IMAGE 任务 fixture（base64 载荷入库，无题干文本）。 */
+    private Job imageClaimedJob() {
+        Job job = queuedJob();
+        job.setInputType("IMAGE");
+        job.setInputText(null);
+        job.setImageBase64("QUJD".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        job.enterStage(JobStatus.EXTRACTING, "领单：开始处理");
+        return job;
+    }
+
+    /** 推进到 AWAITING_CONFIRM 的 IMAGE 任务（识图真题已停驻等用户三选一）。 */
+    private Job awaitingImageJob() {
+        Job job = imageClaimedJob();
+        job.enterStage(JobStatus.AWAITING_CONFIRM, "识图完成，等待用户确认");
+        return job;
+    }
+
+    /** 预置 artifacts/{jobId}/extracted.json（T26 落盘，内容=EXTRACT 常量同源）。 */
+    private void presetExtractedJson() throws java.io.IOException {
+        Files.createDirectories(artifactsExtracted().getParent());
+        Files.writeString(artifactsExtracted(), EXTRACT_JSON);
+    }
+
+    private static final String EXTRACT_JSON =
+            "{\"problemType\":\"计算题\",\"lines\":[{\"id\":\"L1\",\"segments\":"
+                    + "[{\"type\":\"text\",\"value\":\"设 f(x)=x^3，求 a。\"}]}]}";
+
+    @Test
+    @DisplayName("T27 确认闸生效：IMAGE 识图真题 → AWAITING_CONFIRM 停驻（进度闸），全局死线清空（用户挂机不计时），extracted.json 已落盘，生成链零调用")
+    void imageGate_awaitsConfirm_parksWithClearedDeadline() throws Exception {
+        Job job = imageClaimedJob();
+        job.setProcessingDeadlineAt(LocalDateTime.now().plusMinutes(50));   // poll 领单已落的全局死线
+        stubRepo(job);
+        stubStationsOk();
+        when(extractStation.extractImage(anyString(), anyString())).thenReturn(EXTRACT);
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.AWAITING_CONFIRM);
+        assertThat(job.getProcessingDeadlineAt()).isNull();   // 挂起态死线清空（T27 墙钟语义）
+        assertThat(artifactsExtracted()).exists();            // T26 落盘先于闸（confirm 续跑的重建源）
+        assertThat(historyStages(job)).endsWith("EXTRACTING", "AWAITING_CONFIRM");
+        verifyNoInteractions(genPipeline, ttsPipeline, renderWorker);   // 确认前生成链零成本
+        verify(callbackClient, never()).notify(anyString(), any());     // 非终态无回调
+    }
+
+    @Test
+    @DisplayName("T27 开关关闭：app.pipeline.extract-confirm=false → IMAGE 也全自动（兼容既有行为，全程无 AWAITING_CONFIRM）")
+    void imageGateOff_imageRunsFullAuto() throws Exception {
+        props.getPipeline().setExtractConfirm(false);
+        Job job = imageClaimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(extractStation.extractImage(anyString(), anyString())).thenReturn(EXTRACT);
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        assertThat(historyStages(job)).doesNotContain("AWAITING_CONFIRM");
+        verify(extractStation).extractImage(anyString(), anyString());
+    }
+
+    @Test
+    @DisplayName("T27 TEXT 永不过闸：开关开（默认）TEXT 真题照旧直通 DONE，历史零 AWAITING_CONFIRM")
+    void textJob_neverGated() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        assertThat(historyStages(job)).doesNotContain("AWAITING_CONFIRM");
+    }
+
+    // ---- 26. T27：confirm / revise 端点驱动的决策与续跑 ----
+
+    @Test
+    @DisplayName("T27 confirm：AWAITING_CONFIRM → GENERATING 续跑至 DONE；ExtractResult 从盘上 extracted.json 零成本重建（GLM 审题零调用）；全局死线重落")
+    void confirm_rebuildsExtractedFromDisk_runsToDone() throws Exception {
+        Job job = awaitingImageJob();
+        stubRepo(job);
+        stubStationsOk();   // extractImage 不 stub：若误走重取会 NPE 暴露
+        presetExtractedJson();
+        orchestrator.setJobExecutor(Runnable::run);   // 决策后同步驱动（免真线程）
+
+        JobOrchestrator.ConfirmResult result = orchestrator.confirmAwaiting(JOB_ID);
+
+        assertThat(result).isEqualTo(JobOrchestrator.ConfirmResult.ACCEPTED);
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        verify(extractStation, never()).extractImage(anyString(), anyString());
+        verify(extractStation, never()).extract(anyString());
+        assertThat(job.getProcessingDeadlineAt()).isAfter(LocalDateTime.now().plusMinutes(58));   // 死线重落
+        assertThat(historyStages(job)).containsSubsequence("AWAITING_CONFIRM", "GENERATING");
+    }
+
+    @Test
+    @DisplayName("T27 confirm 兜底：盘上 extracted.json 缺失（T26 落盘失败窗口）→ 回退既有重取审题路径，不卡死")
+    void confirm_missingExtractedJson_fallsBackToReExtract() throws Exception {
+        Job job = awaitingImageJob();
+        stubRepo(job);
+        stubStationsOk();
+        when(extractStation.extractImage(anyString(), anyString())).thenReturn(EXTRACT);
+        orchestrator.setJobExecutor(Runnable::run);
+
+        JobOrchestrator.ConfirmResult result = orchestrator.confirmAwaiting(JOB_ID);
+
+        assertThat(result).isEqualTo(JobOrchestrator.ConfirmResult.ACCEPTED);
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        verify(extractStation).extractImage(anyString(), anyString());   // 回退重取恰一次
+    }
+
+    @Test
+    @DisplayName("T27 confirm 状态矩阵：非 AWAITING_CONFIRM（EXTRACTING 中）→ NOT_AWAITING_CONFIRM，状态不动不驱动")
+    void confirm_wrongStatus_rejectedWithoutDriving() {
+        Job job = imageClaimedJob();   // EXTRACTING
+        stubRepo(job);
+        orchestrator.setJobExecutor(submit -> { throw new IllegalStateException("不应驱动"); });
+
+        assertThat(orchestrator.confirmAwaiting(JOB_ID)).isEqualTo(JobOrchestrator.ConfirmResult.NOT_AWAITING_CONFIRM);
+        assertThat(job.getStatus()).isEqualTo(JobStatus.EXTRACTING);
+    }
+
+    @Test
+    @DisplayName("T27 confirm：任务不存在 → NOT_FOUND")
+    void confirm_missingJob_notFound() {
+        when(repo.findById("nope")).thenReturn(Optional.empty());
+
+        assertThat(orchestrator.confirmAwaiting("nope")).isEqualTo(JobOrchestrator.ConfirmResult.NOT_FOUND);
+    }
+
+    @Test
+    @DisplayName("T27 revise：提交修改文本 → 库内转 TEXT（inputText=新文本、图片载荷释放、reviseCount=1、extractRetries 不烧）→ EXTRACTING 重审 → 非废题直接 GENERATING（不出第二张确认卡）→ DONE")
+    void revise_switchesToTextReaudits_directToGenerating() throws Exception {
+        Job job = awaitingImageJob();
+        stubRepo(job);
+        stubStationsOk();   // extract(anyString()) → EXTRACT（TEXT 通道重审）
+        orchestrator.setJobExecutor(Runnable::run);
+
+        JobOrchestrator.ReviseResult result = orchestrator.reviseAwaiting(JOB_ID, "修改后的题目：求 f(x)=x^2 的最小值");
+
+        assertThat(result).isEqualTo(JobOrchestrator.ReviseResult.ACCEPTED);
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        assertThat(job.getInputType()).isEqualTo("TEXT");
+        assertThat(job.getInputText()).isEqualTo("修改后的题目：求 f(x)=x^2 的最小值");
+        assertThat(job.getImageBase64()).isNull();       // 图片载荷释放
+        assertThat(job.getReviseCount()).isEqualTo(1);   // 防刷计数
+        assertThat(job.getExtractRetries()).isZero();    // 用户驱动 ≠ 系统重试，不烧预算
+        verify(extractStation).extract("修改后的题目：求 f(x)=x^2 的最小值");
+        verify(extractStation, never()).extractImage(anyString(), anyString());
+        // 非废题直接进流程：全历史恰一次 AWAITING_CONFIRM（不出第二张确认卡）
+        assertThat(historyStages(job)).filteredOn(s -> s.equals("AWAITING_CONFIRM")).hasSize(1);
+        assertThat(historyStages(job)).containsSubsequence("AWAITING_CONFIRM", "EXTRACTING", "GENERATING");
+    }
+
+    @Test
+    @DisplayName("T27 revise 废题：重审判 notQuestion（Fatal 通道）→ FAILED 带驳回原因，日志必记原因且输入只留前 60 字预览")
+    void revise_notQuestion_failsWithReasonLogged() throws Exception {
+        Job job = awaitingImageJob();
+        stubRepo(job);
+        when(extractStation.extract(anyString()))
+                .thenThrow(new ExtractStation.FatalExtractException("上传/输入内容不是数学题目：与解题无关的广告文本"));
+        orchestrator.setJobExecutor(Runnable::run);
+
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(JobOrchestrator.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        JobOrchestrator.ReviseResult result;
+        String longText = "甲乙丙丁戊己庚辛壬癸".repeat(12);   // 120 字：超 60 字预览口径
+        try {
+            result = orchestrator.reviseAwaiting(JOB_ID, longText);
+        } finally {
+            logger.detachAppender(appender);
+        }
+
+        assertThat(result).isEqualTo(JobOrchestrator.ReviseResult.ACCEPTED);   // 202 受理，废题在重审中判死
+        assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
+        assertThat(job.getErrorMessage()).contains("上传/输入内容不是数学题目").contains("广告文本");
+        assertThat(appender.list).anySatisfy(event -> {
+            String msg = event.getFormattedMessage();
+            assertThat(msg).contains("废题驳回").contains("广告文本");
+        });
+        // 输入预览截断：日志只留前 60 字，120 字全文零打印（key 同理零打印——base64 载荷不入日志）
+        String preview = longText.substring(0, 60);
+        assertThat(appender.list).anySatisfy(event ->
+                assertThat(event.getFormattedMessage()).contains(preview));
+        assertThat(appender.list).allSatisfy(event ->
+                assertThat(event.getFormattedMessage()).doesNotContain(longText));
+    }
+
+    @Test
+    @DisplayName("T27 revise 防刷：reviseCount 已达上限 → LIMIT_EXCEEDED（不烧任务、状态不动、零审题调用）")
+    void revise_limitExceeded_rejectedWithoutBurningTask() throws Exception {
+        props.getPipeline().setMaxRevise(1);
+        Job job = awaitingImageJob();
+        job.setReviseCount(1);   // 已用完 1 次配额
+        stubRepo(job);
+        orchestrator.setJobExecutor(submit -> { throw new IllegalStateException("不应驱动"); });
+
+        JobOrchestrator.ReviseResult result = orchestrator.reviseAwaiting(JOB_ID, "再改一次");
+
+        assertThat(result).isEqualTo(JobOrchestrator.ReviseResult.LIMIT_EXCEEDED);
+        assertThat(job.getStatus()).isEqualTo(JobStatus.AWAITING_CONFIRM);   // 不烧任务
+        assertThat(job.getReviseCount()).isEqualTo(1);
+        verifyNoInteractions(extractStation);
+    }
+
+    @Test
+    @DisplayName("T27 revise 状态矩阵：非 AWAITING_CONFIRM → NOT_AWAITING_CONFIRM，不改输入不驱动")
+    void revise_wrongStatus_rejected() {
+        Job job = claimedJob();   // EXTRACTING TEXT
+        stubRepo(job);
+        orchestrator.setJobExecutor(submit -> { throw new IllegalStateException("不应驱动"); });
+
+        assertThat(orchestrator.reviseAwaiting(JOB_ID, "x")).isEqualTo(JobOrchestrator.ReviseResult.NOT_AWAITING_CONFIRM);
+        assertThat(job.getStatus()).isEqualTo(JobStatus.EXTRACTING);
+        verifyNoInteractions(extractStation);
+    }
+
+    // ---- 27. T27：墙钟与续跑对 AWAITING_CONFIRM 的豁免 ----
+
+    @Test
+    @DisplayName("T27 墙钟：wallClockSweep 不得动 AWAITING_CONFIRM——库内残留过期死线也只跳过（等用户），不判死不提交")
+    void wallClockSweep_ignoresAwaitingConfirm() {
+        List<Runnable> submitted = new ArrayList<>();
+        orchestrator.setJobExecutor(submitted::add);
+        Job awaiting = awaitingImageJob();
+        awaiting.setProcessingDeadlineAt(LocalDateTime.now().minusMinutes(1));   // 挂起前残留的过期死线
+        when(repo.findByStatusNotIn(any())).thenReturn(List.of(awaiting));
+
+        orchestrator.wallClockSweep();
+
+        assertThat(submitted).isEmpty();
+        assertThat(awaiting.getStatus()).isEqualTo(JobStatus.AWAITING_CONFIRM);
+        assertThat(awaiting.getErrorMessage()).isNull();
+    }
+
+    @Test
+    @DisplayName("T27 续跑：启动 sweep 跳过 AWAITING_CONFIRM（等用户决策，不自动推进）")
+    void resumeInterrupted_skipsAwaitingConfirm() {
+        List<Runnable> submitted = new ArrayList<>();
+        orchestrator.setJobExecutor(submitted::add);
+        Job awaiting = awaitingImageJob();
+        Job extracting = imageClaimedJob();
+        when(repo.findByStatusNotIn(any())).thenReturn(List.of(awaiting, extracting));
+
+        orchestrator.resumeInterrupted();
+
+        assertThat(submitted).hasSize(1);   // 仅 EXTRACTING；AWAITING_CONFIRM 不动
+    }
 }
