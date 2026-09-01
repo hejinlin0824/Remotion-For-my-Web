@@ -293,8 +293,10 @@ public class GenShardPipeline {
         //   → 排版病只重做场景片（P3 全部分片；P0/P1/P2 不重做——内容已过 V1-V4+QA 数学核，
         //   骨架与排版无关，全量重做只会烧轮并诱发条数规格连败）。置于所有既有映射之后兜底：
         //   带场景 id/素材段/题干令牌的消息在 ①-④ 已有更细归属，不落本分支，行为零变化。
+        //   评审 M-1 栅栏：仅 QA 来源（FAIL 行按构造恒带 FAIL 字样）生效，V4 REJECT 裸散文
+        //   即使碰巧含词表字（如「超出」）也不入本分支，回 ⑥ 保守全量。
         //   无场景片可路由（骨架零场景）→ null 走保守全量。
-        if (QA_LAYOUT_WORDS.stream().anyMatch(error::contains)) {
+        if (error.contains("FAIL") && QA_LAYOUT_WORDS.stream().anyMatch(error::contains)) {
             return shards.isEmpty() ? null : shards.stream().map(SceneShard::key).toList();
         }
         // ⑥ 解析不出归属（meta/幕覆盖/自由文本等）→ 全部分片重做

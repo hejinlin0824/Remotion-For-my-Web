@@ -300,13 +300,16 @@ class GenShardPipelineTest {
     }
 
     @Test
-    @DisplayName("T24a 非排版 QA 驳回回归：数学错/口播不符/降级原因等自由文本仍保守全量（行为不变）")
+    @DisplayName("T24a 非排版 QA 驳回回归：数学错/口播不符/降级原因等自由文本仍保守全量（行为不变）；M-1 栅栏=无 FAIL 字样裸散文含排版词不入排版分支")
     void qaNonLayoutReject_stillRedoAll() {
         for (String error : List.of(
                 "**FAIL** —— QA 核数学：汇总结论「选 A 正确」与推导矛盾",
                 "FAIL 帧 40 结论卡公式与口播不符",
                 "qa_glm exit=1",
-                "[error] s-s10-step-card.png 单帧审帧最终失败（计划外场景 id）")) {
+                "[error] s-s10-step-card.png 单帧审帧最终失败（计划外场景 id）",
+                // 评审 M-1 栅栏：无 FAIL 字样的裸散文即使含词表字也不入排版分支（防 V4 REJECT 误路由）
+                "大字结论行溢出截字",
+                "V4: 讲画面没有的步骤 7 内容，结论卡文字超出画面")) {
             GenShardPipeline.RoutePlan plan = pipeline.routeErrors(List.of(error), SMALL);
             assertThat(plan.redoAll()).as("「%s」非排版病，仍全量重做", error).isTrue();
             assertThat(plan.summary()).as("「%s」", error).isEqualTo("全部");
