@@ -50,7 +50,7 @@ class WelcomePageTest {
     }
 
     @Test
-    @DisplayName("T26 锚点：识图端点/KaTeX 本地渲染与 vendored 相对路径/修改后重测")
+    @DisplayName("T26 锚点：识图端点/KaTeX 本地渲染与 vendored 相对路径（T27 起「修改后重测」按钮被内联修改替代，不再断言）")
     void containsT26ExtractionAnchors() throws IOException {
         String html = page();
         assertThat(html).contains("/extracted");          // 识图结果只读端点
@@ -58,7 +58,18 @@ class WelcomePageTest {
         assertThat(html).contains("throwOnError");        // 宽容渲染（失败显示原文）
         assertThat(html).contains("katex/katex.min.css"); // vendored KaTeX 相对路径引用
         assertThat(html).contains("katex/katex.min.js");
-        assertThat(html).contains("修改后重测");           // 转存输入区重测按钮
-        assertThat(html).contains("extractLinesToText");  // lines→纯文本（math 包 $…$）
+        assertThat(html).doesNotContain("修改后重测");     // T27：转存重提按钮已删（被确认卡内联修改替代）
+        assertThat(html).contains("extractLinesToText");  // lines→纯文本（math 包 $…$，revise 预填复用）
+    }
+
+    @Test
+    @DisplayName("T27 锚点：confirm/revise 端点、确认卡三按钮、AWAITING_CONFIRM 停驻进度段")
+    void containsT27ConfirmGateAnchors() throws IOException {
+        String html = page();
+        assertThat(html).contains("/confirm");            // 确认识图结果端点
+        assertThat(html).contains("/revise");             // 修改重审端点
+        assertThat(html).contains("确认，开始生成");        // 确认按钮
+        assertThat(html).contains("提交修改");             // 内联修改提交按钮
+        assertThat(html).contains("AWAITING_CONFIRM");    // 停驻段（进度刻度/状态名/动作显隐三处锚点）
     }
 }

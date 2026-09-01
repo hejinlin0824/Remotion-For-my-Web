@@ -95,7 +95,7 @@
   }
   video { width: 100%; max-height: 480px; background: #000; border-radius: 8px; }
   #video-meta { color: var(--muted); font-size: 13px; margin-top: 8px; }
-  /* 识图卡片（T26）：审题产物 KaTeX 可视化 + 修改后重测 */
+  /* 识图卡片（T26）：审题产物 KaTeX 可视化；T27 升级为确认卡（确认/修改/取消） */
   #extract-section h2 { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
   #extract-type { color: var(--muted); font-size: 13px; font-weight: 400; }
   #extract-body { display: flex; flex-direction: column; gap: 6px; }
@@ -106,11 +106,10 @@
   .ex-hint { color: var(--muted); font-size: 12px; }
   .ex-actions { margin-top: 10px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .katex { font-size: 1.08em; }
-  /* 进度区转存提示（T26「修改后重测」解除跟踪后的去向说明） */
-  #transfer-note {
-    background: #eff5ff; border: 1px solid #bfd4ff; border-radius: 7px;
-    padding: 10px 12px; font-size: 13px; color: var(--brand); margin-top: 12px;
-  }
+  /* 确认卡（T27）：修改内联 textarea + 提示行 + 三按钮组 */
+  #revise-text { min-height: 110px; font-size: 14px; }
+  #confirm-hint { margin: 0 0 10px; color: var(--warn); }
+  #confirm-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 </style>
 </head>
 <body>
@@ -162,7 +161,6 @@
     <div class="stage-meta"><span id="stage-label"></span> · <span id="elapsed-label"></span> · <span id="job-meta"></span></div>
     <ul id="stage-list"></ul>
     <div id="retry-box" hidden></div>
-    <div id="transfer-note" hidden>识图内容已转存到输入区（文字题目页签），可修改后重新提交；本页已停止跟踪该任务进度。</div>
     <div class="row" id="cancel-row">
       <button type="button" id="cancel-btn" class="danger" hidden>取消任务</button>
       <span id="cancel-msg" class="err" hidden></span>
@@ -181,13 +179,26 @@
     </div>
   </section>
 
-  <!-- 区 2.5：识图内容（T26：审题产物 KaTeX 可视化，TEXT/IMAGE 输入都显示；失败保留可回看） -->
+  <!-- 区 2.5：识图内容（T26：审题产物 KaTeX 可视化；T27：AWAITING_CONFIRM 时升级为确认卡——确认/修改/取消三选一） -->
   <section id="extract-section" class="card" hidden>
     <h2>识图内容 <span id="extract-type"></span></h2>
+    <div id="confirm-hint" class="ex-hint" hidden>请核对识图结果：确认无误直接开始生成；有误可修改后重新审题（转文字题流程，不再二次确认）；也可取消本任务。</div>
     <div id="extract-body"></div>
     <div class="ex-actions">
-      <button type="button" id="retest-btn">修改后重测</button>
-      <span class="ex-hint">把识图结果转存为文字题目（math 段包 $…$）供编辑重提；原任务仍在后台运行，可取消。</span>
+      <div id="confirm-actions" hidden>
+        <button type="button" id="confirm-btn" class="primary">确认，开始生成</button>
+        <button type="button" id="revise-toggle-btn">修改</button>
+        <button type="button" id="confirm-cancel-btn" class="danger">取消任务</button>
+      </div>
+      <div id="revise-pane" hidden>
+        <textarea id="revise-text" spellcheck="false" placeholder="修改后的题目全文（math 段已包 $…$，可自由编辑）…"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button type="button" id="revise-submit-btn" class="primary">提交修改</button>
+          <button type="button" id="revise-back-btn">返回</button>
+          <span id="revise-msg" class="err" hidden></span>
+        </div>
+      </div>
+      <span class="ex-hint" id="extract-hint" hidden></span>
     </div>
   </section>
 
@@ -208,14 +219,16 @@ var API = '/api/v1/jobs';
 var POLL_MS = 3000;
 var MAX_IMG_BYTES = 10 * 1024 * 1024;
 var TERMINAL = ['DONE', 'FAILED', 'CANCELLED'];
-/* 可取消窗口（SPEAKING 起不可取消，故 SPEAKING 不显示取消按钮） */
-var CANCELLABLE = ['QUEUED', 'EXTRACTING', 'GENERATING', 'REVIEWING', 'QA', 'RENDERING'];
+/* 可取消窗口（SPEAKING 起不可取消，故 SPEAKING 不显示取消按钮；T27 待确认态可直接取消） */
+var CANCELLABLE = ['QUEUED', 'EXTRACTING', 'AWAITING_CONFIRM', 'GENERATING', 'REVIEWING', 'QA', 'RENDERING'];
 /* 各阶段进度区间（%）与典型时长（秒，run-3 实测校准）：
    段内进度 = start + (end−start) × min(1, elapsedInStage/typical)；
    DONE=100% 唯一满格；FAILED/CANCELLED 不在刻度表 → 进度条保持原值不动；
-   QA→GENERATING 驳回回环自然回退到生成段（不新增钳制，T25 评审 M-1 顺延语义不变）。 */
+   QA→GENERATING 驳回回环自然回退到生成段（不新增钳制，T25 评审 M-1 顺延语义不变）。
+   T27：AWAITING_CONFIRM=5% 停驻（start=end，等用户三选一不定时）。 */
 var SEGMENTS = {
   EXTRACTING: { start: 1,  end: 5,  typical: 15 },
+  AWAITING_CONFIRM: { start: 5, end: 5, typical: 1 },
   GENERATING: { start: 5,  end: 30, typical: 360 },
   REVIEWING:  { start: 30, end: 33, typical: 50 },
   SPEAKING:   { start: 33, end: 42, typical: 180 },
@@ -223,7 +236,7 @@ var SEGMENTS = {
   RENDERING:  { start: 48, end: 99, typical: 960 }
 };
 var STAGE_ZH = {
-  QUEUED: '排队中', EXTRACTING: '审题（题目抽取）', GENERATING: '生成课件',
+  QUEUED: '排队中', EXTRACTING: '审题（题目抽取）', AWAITING_CONFIRM: '识图完成，等待确认', GENERATING: '生成课件',
   REVIEWING: '审校 / 驳回回环', SPEAKING: '配音合成', QA: '审帧预审',
   RENDERING: '渲染成片', DONE: '已完成', FAILED: '失败', CANCELLED: '已取消'
 };
@@ -235,8 +248,9 @@ var PHASES = [
   { key: 'QA',         label: '审帧' },
   { key: 'RENDERING',  label: '渲染' }
 ];
-/* status → 清单中正在进行的相位下标（-1 尚未开始 / 5 全部完成）；REVIEWING 归生成段 */
-var ACTIVE = { QUEUED: -1, EXTRACTING: 0, GENERATING: 1, REVIEWING: 1, SPEAKING: 2, QA: 3, RENDERING: 4, DONE: 5 };
+/* status → 清单中正在进行的相位下标（-1 尚未开始 / 5 全部完成）；REVIEWING 归生成段；
+   T27：AWAITING_CONFIRM=0.5（审题已完成 ✓、其余未开始，无进行中相位） */
+var ACTIVE = { QUEUED: -1, EXTRACTING: 0, AWAITING_CONFIRM: 0.5, GENERATING: 1, REVIEWING: 1, SPEAKING: 2, QA: 3, RENDERING: 4, DONE: 5 };
 
 /* ===== 运行态 ===== */
 var jobId = null;
@@ -346,7 +360,6 @@ function attach(id) {
   $('cancel-msg').hidden = true;
   $('poll-msg').hidden = true;
   resetExtracted();
-  $('transfer-note').hidden = true;
   resetPlayer();
   $('video-meta').textContent = '';
   $('player-section').hidden = true;
@@ -381,7 +394,7 @@ function poll() {
     if (!res.ok || !res.v || !res.v.status) { schedulePoll(); return; } /* 瞬时故障：继续轮询 */
     job = res.v;
     renderProgress(job);
-    maybeFetchExtracted(job);   /* T26：进 GENERATING 及之后拉识图结果（404 静默下轮重试） */
+    maybeFetchExtracted(job);   /* T26：进 AWAITING_CONFIRM/GENERATING 及之后拉识图结果（404 静默下轮重试） */
     if (TERMINAL.indexOf(job.status) >= 0) finish(job);
     else schedulePoll();
   }).catch(function () { schedulePoll(); }); /* 网络抖动：继续轮询 */
@@ -462,6 +475,7 @@ function renderProgress(v) {
   $('cancel-btn').hidden = !showCancel;
   $('cancel-tag').hidden = !(v.cancelRequested && !showCancel && TERMINAL.indexOf(v.status) < 0);
   if (!v.cancelRequested) $('cancel-msg').hidden = true;
+  updateConfirmCard(v);   /* T27：确认卡按钮组只在 AWAITING_CONFIRM 停驻时出现 */
 }
 function renderChecklist(v) {
   var active = activeIndex(v);
@@ -537,6 +551,9 @@ function finish(v) {
   stopTimers();
   $('cancel-btn').hidden = true;
   $('cancel-tag').hidden = true;
+  setConfirmButtonsEnabled(false); /* T27：终态后确认卡按钮全部失效 */
+  $('confirm-actions').hidden = true;
+  $('revise-pane').hidden = true;
   setBusy(false); /* 终态即不在进行中，允许提交下一单 */
   maybeFetchExtracted(v); /* 终态也补拉一次（T26 白名单终态保留：失败也能回看识图内容） */
   if (v.status === 'DONE') {
@@ -594,20 +611,26 @@ function again() {
   resetPlayer();
   $('fail-panel').hidden = true;
   resetExtracted();
-  $('transfer-note').hidden = true;
   setBusy(false);
   window.scrollTo(0, 0);
 }
-/* 清空识图卡片（attach/again 复位）：容器、题型小字与显隐全回默认 */
+/* 清空识图卡片（attach/again 复位）：容器、题型小字、确认卡三按钮与修改面板全回默认 */
 function resetExtracted() {
   extracted = null;
   extractedLoaded = false;
+  reviseOpen = false;
+  cardBusy = false;
   $('extract-body').innerHTML = '';
   $('extract-type').textContent = '';
+  $('confirm-hint').hidden = true;
+  $('confirm-actions').hidden = true;
+  $('revise-pane').hidden = true;
+  $('revise-msg').hidden = true;
+  $('extract-hint').hidden = true;
   $('extract-section').hidden = true;
 }
 
-/* ===== 识图内容（T26）：拉取 / KaTeX 可视化 / 修改后重测 ===== */
+/* ===== 识图内容（T26）：拉取 / KaTeX 可视化；T27 确认卡三选一 ===== */
 function maybeFetchExtracted(v) {
   if (extractedLoaded || !jobId) return;
   if (!v || v.status === 'QUEUED' || v.status === 'EXTRACTING') return; /* 未落盘窗口：下轮重试 */
@@ -641,8 +664,8 @@ function renderExtracted(data) {
     box.appendChild(row);
   });
   $('extract-type').textContent = (data && data.problemType) ? ('题型：' + data.problemType) : '';
-  $('retest-btn').hidden = !lines.length;
   $('extract-section').hidden = false;
+  updateConfirmCard(job);   /* 拉到识图结果时按当前状态决定是否出现确认卡按钮组 */
 }
 /* 单段渲染：text → 纯文本；math → katex.render（throwOnError:false，失败显示原文+红标） */
 function renderSeg(seg) {
@@ -662,7 +685,7 @@ function renderSeg(seg) {
   s.textContent = value;
   return s;
 }
-/* lines → 纯文本：text 段直拼；math 段包 $...$；行间 \n（TEXT 输入契约同源） */
+/* lines → 纯文本：text 段直拼；math 段包 $...$；行间 \n（TEXT 输入契约同源；T27 revise 预填复用） */
 function extractLinesToText(data) {
   var out = [];
   ((data && data.lines) || []).forEach(function (line) {
@@ -675,16 +698,109 @@ function extractLinesToText(data) {
   });
   return out.join('\n');
 }
-/* 修改后重测：识图内容转存 TEXT 输入区 → 解除当前任务跟踪（stopTimers+转存提示）→
-   提交按钮解锁，用户编辑后重新提交新单；原任务不受影响仍在后台运行 */
-function retestFromExtracted() {
-  if (!extracted) return;
-  $('q-text').value = extractLinesToText(extracted);
-  switchTab('TEXT');
+
+/* ===== 确认卡（T27）：AWAITING_CONFIRM 停驻时三选一——确认 / 修改 / 取消 ===== */
+var reviseOpen = false;   /* 修改面板展开态（轮询重渲染时保持，离开确认态自动收起） */
+var cardBusy = false;     /* 防双击：决策 POST 在途即禁用，轮询重渲染不得重新启用（状态离开或失败才复位） */
+/* 按当前状态显隐确认卡：仅在识图结果已拉到且任务停驻 AWAITING_CONFIRM 时出现；
+   离开该状态（confirm/revise 续跑、取消、终态）自动收起（刷新/分享链接恢复同样成立）。 */
+function updateConfirmCard(v) {
+  var show = !!extracted && !!v && v.status === 'AWAITING_CONFIRM';
+  reviseOpen = reviseOpen && show;
+  if (!show) cardBusy = false;
+  $('confirm-hint').hidden = !show;
+  $('confirm-actions').hidden = !(show && !reviseOpen);
+  $('revise-pane').hidden = !(show && reviseOpen);
+  if (show) setConfirmButtonsEnabled(!cardBusy);
+}
+function setConfirmButtonsEnabled(enabled) {
+  $('confirm-btn').disabled = !enabled;
+  $('revise-toggle-btn').disabled = !enabled;
+  $('confirm-cancel-btn').disabled = !enabled;
+  $('revise-submit-btn').disabled = !enabled;
+  $('revise-back-btn').disabled = !enabled;
+}
+/* 立即拉一次最新状态（决策受理后不等 3s）：先停既有定时器再拉，杜绝双轮询链 */
+function pollNow() {
   stopTimers();
-  $('transfer-note').hidden = false;
-  setBusy(false);
-  window.scrollTo(0, 0);
+  poll();
+}
+/* 确认，开始生成：POST confirm → 202 后轮询自然接管（进度 5% → 生成段爬升）；
+   防双击：点击即全按钮禁用（cardBusy 跨轮询保持），失败（409/网络）回滚启用让用户重试 */
+function confirmExtracted() {
+  cardBusy = true;
+  setConfirmButtonsEnabled(false);
+  $('revise-msg').hidden = true;
+  fetch(API + '/' + encodeURIComponent(jobId) + '/confirm', { method: 'POST' }).then(function (r) {
+    if (r.status === 202) {
+      $('extract-hint').textContent = '已确认，开始生成课件…';
+      $('extract-hint').hidden = false;
+      pollNow();
+    } else {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        showCardError((data && data.error) ? data.error : '确认失败（HTTP ' + r.status + '）');
+        cardBusy = false;
+        setConfirmButtonsEnabled(true);
+      });
+    }
+  }).catch(function (e) {
+    showCardError('网络错误：' + e.message);
+    cardBusy = false;
+    setConfirmButtonsEnabled(true);
+  });
+}
+/* 修改：展开内联 textarea（lines→文本，math 包 $…$ 预填） */
+function openRevise() {
+  reviseOpen = true;
+  updateConfirmCard(job);
+  $('revise-msg').hidden = true;
+  $('revise-text').focus();
+}
+function closeRevise() {
+  reviseOpen = false;
+  updateConfirmCard(job);
+  $('revise-msg').hidden = true;
+}
+/* 提交修改：POST revise → 202 后服务端转 TEXT 重审（TEXT 永不过闸，非废题直接生成，不再出确认卡）；
+   防双击同确认；400/409 显示原因并保持面板可改 */
+function submitRevise() {
+  var text = $('revise-text').value.trim();
+  if (!text) {
+    showReviseError('修改内容不能为空');
+    return;
+  }
+  cardBusy = true;
+  setConfirmButtonsEnabled(false);
+  fetch(API + '/' + encodeURIComponent(jobId) + '/revise', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: text })
+  }).then(function (r) {
+    if (r.status === 202) {
+      reviseOpen = false;
+      $('extract-hint').textContent = '已提交修改，重新审题中（按文字题目流程，不再二次确认）…';
+      $('extract-hint').hidden = false;
+      pollNow();
+    } else {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        showReviseError((data && data.error) ? data.error : '提交失败（HTTP ' + r.status + '）');
+        cardBusy = false;
+        setConfirmButtonsEnabled(true);
+      });
+    }
+  }).catch(function (e) {
+    showReviseError('网络错误：' + e.message);
+    cardBusy = false;
+    setConfirmButtonsEnabled(true);
+  });
+}
+function showCardError(msg) {
+  $('extract-hint').textContent = msg;
+  $('extract-hint').hidden = false;
+}
+function showReviseError(msg) {
+  $('revise-msg').textContent = msg;
+  $('revise-msg').hidden = false;
 }
 /* 清空播放器：摘掉 src 并 load() 释放缓冲，杜绝任何残留视频请求 */
 function resetPlayer() {
@@ -700,7 +816,12 @@ $('tab-image').addEventListener('click', function () { switchTab('IMAGE'); });
 $('submit-btn').addEventListener('click', submitJob);
 $('cancel-btn').addEventListener('click', cancelJob);
 $('again-btn').addEventListener('click', again);
-$('retest-btn').addEventListener('click', retestFromExtracted);
+/* T27 确认卡三按钮 */
+$('confirm-btn').addEventListener('click', confirmExtracted);
+$('revise-toggle-btn').addEventListener('click', openRevise);
+$('confirm-cancel-btn').addEventListener('click', cancelJob);   /* 取消走既有 DELETE（服务端待确认态就地终态） */
+$('revise-submit-btn').addEventListener('click', submitRevise);
+$('revise-back-btn').addEventListener('click', closeRevise);
 $('img-clear').addEventListener('click', clearImage);
 $('q-image').addEventListener('change', function (e) { handleFile(e.target.files && e.target.files[0]); });
 var dz = $('drop-zone');
