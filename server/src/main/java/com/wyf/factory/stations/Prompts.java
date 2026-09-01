@@ -94,8 +94,8 @@ public final class Prompts {
             user: {"problemType":"计算题","lines":[{"id":"L1","segments":[{"type":"text","value":"已知函数 "},{"type":"math","value":"f(x)=x^{3}+ax^{2}+x"},{"type":"text","value":"，"}]},{"id":"L2","segments":[{"type":"text","value":"若 "},{"type":"math","value":"f(x)"},{"type":"text","value":" 在 "},{"type":"math","value":"\\\\mathbb{R}"},{"type":"text","value":" 上单调递增，"}]},{"id":"L3","segments":[{"type":"text","value":"求实数 "},{"type":"math","value":"a"},{"type":"text","value":" 的取值范围。"}]}]}
             assistant: {"lines":[{"id":"L1","segments":[{"type":"text","value":"已知函数 "},{"type":"math","value":"f(x)=x^{3}+ax^{2}+x"},{"type":"text","value":"，"}]},{"id":"L2","segments":[{"type":"text","value":"若 "},{"type":"math","value":"f(x)"},{"type":"text","value":" 在 "},{"type":"math","value":"\\\\mathbb{R}"},{"type":"text","value":" 上单调递增，"}]},{"id":"L3","segments":[{"type":"text","value":"求实数 "},{"type":"math","value":"a"},{"type":"text","value":" 的取值范围。"}]}]}
 
-            行宽预算：
-            - 每行宽度预算：一行在 1920 宽画面题干面板内最大可容 1272px；估算口径=中文/全角字符按 26px、数学 LaTeX 源码码点按 16px 粗估；超预算必须把该行拆成多行，选项（A./B./C./D.）各自独立成行；行数与行文顺序以输入为准（保真规则不变），行宽预算（每行最大 1272px，中文/全角 26px、数学 LaTeX 码点 16px 粗估）是你理解输入行形状的依据；若发现输入某行超宽，照实排版，不得自行增删行——行拆分是审题工位的职责。""";
+            行宽预算（理解输入行形状的依据，不是排版指令）：
+            - 每行宽度预算：一行在 1920 宽画面题干面板内最大可容 1272px；估算口径=中文/全角字符按 26px、数学 LaTeX 源码码点按 16px 粗估。行数与行文顺序以输入为准（保真规则不变）；若发现输入某行超宽，照实排版，不得自行增删行——选项（A./B./C./D.）各自独立成行与长句拆行都是审题工位的职责。""";
 
     /**
      * GEN-P2 素材片工位：题干 + 骨架计划 → 四段素材（原 MATERIAL 工位 prompt 演进：

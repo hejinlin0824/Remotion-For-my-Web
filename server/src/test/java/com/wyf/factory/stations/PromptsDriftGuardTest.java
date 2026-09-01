@@ -81,18 +81,18 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("T23/R1：PROBLEM_SLICE 末尾追加行宽预算规则（1272px/26px/16px 粗估口径、行数以输入为准不自行增删行、行拆分职责归审题工位）")
+    @DisplayName("T23/R1+F1 评审修订：PROBLEM_SLICE 末尾行宽预算段=单一一致口径（预算是认知依据非排版指令，拆行职责归审题工位）")
     void problemSlicePromptCarriesLineWidthBudgetRule() {
         assertThat(Prompts.PROBLEM_SLICE)
                 .as("行宽预算规则逐字（数值与 T20a V1Budget 题干宽预算单源语义）")
-                .contains("行宽预算：")
+                .contains("行宽预算（理解输入行形状的依据，不是排版指令）：")
                 .contains("- 每行宽度预算：一行在 1920 宽画面题干面板内最大可容 1272px；估算口径=中文/全角字符按 26px、"
-                        + "数学 LaTeX 源码码点按 16px 粗估；超预算必须把该行拆成多行，选项（A./B./C./D.）各自独立成行；"
-                        + "行数与行文顺序以输入为准（保真规则不变），行宽预算（每行最大 1272px，中文/全角 26px、数学 LaTeX 码点 16px 粗估）"
-                        + "是你理解输入行形状的依据；若发现输入某行超宽，照实排版，不得自行增删行——行拆分是审题工位的职责。")
-                .as("R1 修复轮裁定：行数可增表述已删除，行数语义与保真红线/工位校验一致")
+                        + "数学 LaTeX 源码码点按 16px 粗估。行数与行文顺序以输入为准（保真规则不变）；"
+                        + "若发现输入某行超宽，照实排版，不得自行增删行——选项（A./B./C./D.）各自独立成行与长句拆行都是审题工位的职责。")
+                .as("R1 修复轮裁定+评审 F1：行数可增/自行拆行两类矛盾表述均已删除，与保真红线/工位校验一致")
                 .doesNotContain("行数可以比输入多")
-                .doesNotContain("拆行是你的排版职责");
+                .doesNotContain("拆行是你的排版职责")
+                .doesNotContain("超预算必须把该行拆成多行");
         assertThat(Prompts.PROBLEM_SLICE.indexOf("行宽预算"))
                 .as("追加只在常量末尾：行宽预算段在 golden few-shot 示例段之后")
                 .isGreaterThan(Prompts.PROBLEM_SLICE.indexOf("示例："));
