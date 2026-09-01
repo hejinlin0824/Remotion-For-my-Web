@@ -19,10 +19,10 @@ class SkeletonLibraryTest {
     }
 
     @Test
-    @DisplayName("四题型规格逐字节=控制器裁定表（基础题收窄/证明题下限4/应用题上限8）")
+    @DisplayName("四题型规格=控制器裁定表（T24b 事故 001db856 细化：基础题 knowledge 2-4/pitfalls 1-3；证明题下限4/应用题上限8 不动）")
     void specTableMatchesRuling() {
         assertThat(SkeletonLibrary.spec("基础题"))
-                .isEqualTo(spec(2, 3, 3, 6, 1, 2, 3, 4));
+                .isEqualTo(spec(2, 4, 3, 6, 1, 3, 3, 4));
         assertThat(SkeletonLibrary.spec("证明题"))
                 .isEqualTo(spec(2, 4, 4, 10, 1, 3, 3, 6));
         assertThat(SkeletonLibrary.spec("应用题"))

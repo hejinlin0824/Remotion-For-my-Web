@@ -376,19 +376,23 @@ class CoordinatorStationTest {
     }
 
     @Test
-    @DisplayName("T20b 基础题其他段抽查：knowledge 2-3 / pitfalls 1-2 / generalMethod 3-4 越界均带题型令牌")
+    @DisplayName("T24b 基础题边界细化（事故 001db856）：knowledge 2-4 / pitfalls 1-3（=4/=3 合法，=5/=4 违规）；generalMethod 3-4 不动（5 违规）")
     void basicTypeOtherSectionSpotChecks() {
         when(glm.chat(eq(Prompts.COORDINATOR), anyString()))
-                .thenReturn(skeleton("基础题", 4, 4, 1, 3))
-                .thenReturn(skeleton("基础题", 2, 4, 3, 3))
-                .thenReturn(skeleton("基础题", 2, 4, 1, 5));
+                .thenReturn(skeleton("基础题", 4, 4, 1, 3))   // knowledge=4：旧表违规（4 连败死因），新表合法
+                .thenReturn(skeleton("基础题", 5, 4, 1, 3))   // knowledge=5：仍违规
+                .thenReturn(skeleton("基础题", 2, 4, 3, 3))   // pitfalls=3：旧表违规，新表合法
+                .thenReturn(skeleton("基础题", 2, 4, 4, 3))   // pitfalls=4：仍违规
+                .thenReturn(skeleton("基础题", 2, 4, 1, 5));  // generalMethod=5：3-4 不动，仍违规
 
+        assertThatCode(() -> station.generate(EXTRACT)).doesNotThrowAnyException();
         assertThatThrownBy(() -> station.generate(EXTRACT))
                 .isInstanceOf(GlmException.class)
-                .hasMessageContaining("骨架（基础题）knowledge=4 高于上限 3");
+                .hasMessageContaining("骨架（基础题）knowledge=5 高于上限 4");
+        assertThatCode(() -> station.generate(EXTRACT)).doesNotThrowAnyException();
         assertThatThrownBy(() -> station.generate(EXTRACT))
                 .isInstanceOf(GlmException.class)
-                .hasMessageContaining("骨架（基础题）pitfalls=3 高于上限 2");
+                .hasMessageContaining("骨架（基础题）pitfalls=4 高于上限 3");
         assertThatThrownBy(() -> station.generate(EXTRACT))
                 .isInstanceOf(GlmException.class)
                 .hasMessageContaining("骨架（基础题）generalMethod=5 高于上限 4");
