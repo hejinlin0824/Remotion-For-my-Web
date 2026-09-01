@@ -89,8 +89,11 @@ public class Job {
      * 识图结果「修改重审」（revise）已用次数（T27 防刷）：用户在 AWAITING_CONFIRM 提交修改文本
      * 转 TEXT 重审时 +1；达到 app.pipeline.max-revise（默认 10）后 revise 请求 409 拒绝
      * （不烧任务——用户驱动 ≠ 系统重试，与 extractRetries 完全独立）。
-     * Hibernate 自动 DDL 建列；H2 文件库老行默认 0。
+     * Hibernate 自动 DDL 建列。columnDefinition 必须带 DEFAULT：H2 拒绝对有行数据的表追加
+     * NOT NULL 无默认列（23:09 起服务实测崩启动，见 LegacyDbMigrationTest），带 DEFAULT
+     * 则迁移时老行回填 0。
      */
+    @Column(columnDefinition = "integer default 0")
     private int reviseCount;
 
     /** 最近一次阶段内错误（可重试路径） */
