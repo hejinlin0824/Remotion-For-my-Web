@@ -106,7 +106,8 @@ public final class V1Budget {
             double width = tenths / 10.0;
             double scale = PROBLEM_LINE_BUDGET / width;
             if (scale < PROBLEM_FLOOR) {
-                errors.add("V1/题干宽: problem.lines[%d] 估宽 %.0fpx 超出题干面板预算（缩放 %.3f 低于下限 0.6，渲染必溢出）"
+                // T23：尾缀修复指引（拆行/选项各占一行）只追加在消息末尾，「题干」路由令牌（→P1）保持消息头原状
+                errors.add("V1/题干宽: problem.lines[%d] 估宽 %.0fpx 超出题干面板预算（缩放 %.3f 低于下限 0.6，渲染必溢出）；修复指引：把该行拆分为多行（选项各占一行）"
                         .formatted(i, width, scale));
             }
         }

@@ -262,6 +262,9 @@ class GenShardPipelineTest {
                 .summary()).isEqualTo("P2");
         assertThat(route("V1/字数超限: pitfalls[0].claim 长度 21 码点超出上限 20")
                 .summary()).isEqualTo("P2");
+        // T23：题干宽消息末尾追加修复指引后仍路由 P1（尾缀不含场景 id/素材段令牌，不引诱误路由）
+        assertThat(route("V1/题干宽: problem.lines[2] 估宽 2246px 超出题干面板预算（缩放 0.566 低于下限 0.6，渲染必溢出）；修复指引：把该行拆分为多行（选项各占一行）")
+                .summary()).isEqualTo("P1");
     }
 
     // ---- 3. 轮内只补错片（缓存复用） ----

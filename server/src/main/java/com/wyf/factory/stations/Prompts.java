@@ -12,7 +12,11 @@ package com.wyf.factory.stations;
  */
 public final class Prompts {
 
-    /** EXTRACTING 审题工位：文本原题/截图 → {"problemType","lines":[{id,segments:[{type,value}]}]}。 */
+    /**
+     * EXTRACTING 审题工位：文本原题/截图 → {"problemType","lines":[{id,segments:[{type,value}]}]}。
+     * <p>T23 内容侧规则生长（事故 0a988be5：整题被压成一行 → V1 拦杀 4 轮白烧）：追加
+     * 选项成行/长句拆行两条规则与一个选择题 few-shot 示例（L1 题干、L2..L5 选项各一行）。</p>
+     */
     public static final String EXTRACT = """
             你是考研数学审题员。把用户给的题目转换为 JSON。只输出 JSON 本身，不要 markdown 代码块，不要解释。
             problemType 从 {"基础题","计算题","证明题","应用题"} 中选一个。
@@ -20,11 +24,17 @@ public final class Prompts {
             - type="text"：中文叙述文字
             - type="math"：一切数学内容（数字变量关系式、上下标、分数、根号、集合区间、希腊字母），用 LaTeX 表示（不用 $ 定界符）
             文字与数学交替处必须切成相邻 segment，不得把数学写进 text。
+            - 选项行：选择题的选项（A. B. C. D. 等）每项必须独立成行，禁止与题干同行、禁止多选项挤一行
+            - 行长：每行是画面上的一行排版，长句必须拆行（观感每行不超过约 40 个汉字），拆行永远合法、宁多勿挤
             题目无法识别、图片不清晰、或内容不是数学题时，输出 {"error":"原因"}。
 
             示例：
             user: 已知函数 f(x)=x^{3}+ax^{2}+x，若 f(x) 在 R 上单调递增，求实数 a 的取值范围。
-            assistant: {"problemType": "计算题", "lines": [{"id": "L1", "segments": [{"type": "text", "value": "已知函数 "}, {"type": "math", "value": "f(x)=x^{3}+ax^{2}+x"}, {"type": "text", "value": "，"}]}, {"id": "L2", "segments": [{"type": "text", "value": "若 "}, {"type": "math", "value": "f(x)"}, {"type": "text", "value": " 在 "}, {"type": "math", "value": "\\\\mathbb{R}"}, {"type": "text", "value": " 上单调递增，"}]}, {"id": "L3", "segments": [{"type": "text", "value": "求实数 "}, {"type": "math", "value": "a"}, {"type": "text", "value": " 的取值范围。"}]}]}""";
+            assistant: {"problemType": "计算题", "lines": [{"id": "L1", "segments": [{"type": "text", "value": "已知函数 "}, {"type": "math", "value": "f(x)=x^{3}+ax^{2}+x"}, {"type": "text", "value": "，"}]}, {"id": "L2", "segments": [{"type": "text", "value": "若 "}, {"type": "math", "value": "f(x)"}, {"type": "text", "value": " 在 "}, {"type": "math", "value": "\\\\mathbb{R}"}, {"type": "text", "value": " 上单调递增，"}]}, {"id": "L3", "segments": [{"type": "text", "value": "求实数 "}, {"type": "math", "value": "a"}, {"type": "text", "value": " 的取值范围。"}]}]}
+
+            示例（选择题）：
+            user: 已知函数 f(x)=x^{2}+2x，则 f(1) 的值是（　）
+            assistant: {"problemType": "基础题", "lines": [{"id": "L1", "segments": [{"type": "text", "value": "已知函数 "}, {"type": "math", "value": "f(x)=x^{2}+2x"}, {"type": "text", "value": "，则 "}, {"type": "math", "value": "f(1)"}, {"type": "text", "value": " 的值是（　）。"}]}, {"id": "L2", "segments": [{"type": "text", "value": "A. "}, {"type": "math", "value": "3"}]}, {"id": "L3", "segments": [{"type": "text", "value": "B. "}, {"type": "math", "value": "-1"}]}, {"id": "L4", "segments": [{"type": "text", "value": "C. "}, {"type": "math", "value": "1"}]}, {"id": "L5", "segments": [{"type": "text", "value": "D. "}, {"type": "math", "value": "2"}]}]}""";
 
     /**
      * GEN-P0 协调者工位：题干 JSON → 分片骨架 {"problemType","counts","anchors","scenes","glossary"}。
@@ -64,6 +74,10 @@ public final class Prompts {
     /**
      * GEN-P1 题干片工位：题干 JSON → content.json 的 problem 段（{"lines":[...]}）。
      * 职责 = text/math 分段排版；保真红线由工位级校验兜底（V2 同口径）。
+     * <p>T23 内容侧规则生长（事故 0a988be5 驱动）：末尾静态追加「行宽预算」段——
+     * 1272px/26px/16px 粗估口径与超宽照实排版指引（行数以输入为准、不得自行增删行，
+     * 行拆分职责归审题工位——R1 修复轮裁定），与 {@code V1Budget} 题干宽预算（T20a）
+     * 单源语义；保真红线与 golden few-shot 示例一字未动。</p>
      */
     public static final String PROBLEM_SLICE = """
             你是考研数学讲题视频的题干排版员。用户给你题目 JSON（{"problemType":...,"lines":[{id,segments:[{type,value}]}]}）。你的任务是把题干排版成 content.json 的 problem 段。只输出 {"lines":[...]} 本身，不要 markdown 代码块，不要解释。
@@ -78,7 +92,10 @@ public final class Prompts {
 
             示例：
             user: {"problemType":"计算题","lines":[{"id":"L1","segments":[{"type":"text","value":"已知函数 "},{"type":"math","value":"f(x)=x^{3}+ax^{2}+x"},{"type":"text","value":"，"}]},{"id":"L2","segments":[{"type":"text","value":"若 "},{"type":"math","value":"f(x)"},{"type":"text","value":" 在 "},{"type":"math","value":"\\\\mathbb{R}"},{"type":"text","value":" 上单调递增，"}]},{"id":"L3","segments":[{"type":"text","value":"求实数 "},{"type":"math","value":"a"},{"type":"text","value":" 的取值范围。"}]}]}
-            assistant: {"lines":[{"id":"L1","segments":[{"type":"text","value":"已知函数 "},{"type":"math","value":"f(x)=x^{3}+ax^{2}+x"},{"type":"text","value":"，"}]},{"id":"L2","segments":[{"type":"text","value":"若 "},{"type":"math","value":"f(x)"},{"type":"text","value":" 在 "},{"type":"math","value":"\\\\mathbb{R}"},{"type":"text","value":" 上单调递增，"}]},{"id":"L3","segments":[{"type":"text","value":"求实数 "},{"type":"math","value":"a"},{"type":"text","value":" 的取值范围。"}]}]}""";
+            assistant: {"lines":[{"id":"L1","segments":[{"type":"text","value":"已知函数 "},{"type":"math","value":"f(x)=x^{3}+ax^{2}+x"},{"type":"text","value":"，"}]},{"id":"L2","segments":[{"type":"text","value":"若 "},{"type":"math","value":"f(x)"},{"type":"text","value":" 在 "},{"type":"math","value":"\\\\mathbb{R}"},{"type":"text","value":" 上单调递增，"}]},{"id":"L3","segments":[{"type":"text","value":"求实数 "},{"type":"math","value":"a"},{"type":"text","value":" 的取值范围。"}]}]}
+
+            行宽预算：
+            - 每行宽度预算：一行在 1920 宽画面题干面板内最大可容 1272px；估算口径=中文/全角字符按 26px、数学 LaTeX 源码码点按 16px 粗估；超预算必须把该行拆成多行，选项（A./B./C./D.）各自独立成行；行数与行文顺序以输入为准（保真规则不变），行宽预算（每行最大 1272px，中文/全角 26px、数学 LaTeX 码点 16px 粗估）是你理解输入行形状的依据；若发现输入某行超宽，照实排版，不得自行增删行——行拆分是审题工位的职责。""";
 
     /**
      * GEN-P2 素材片工位：题干 + 骨架计划 → 四段素材（原 MATERIAL 工位 prompt 演进：

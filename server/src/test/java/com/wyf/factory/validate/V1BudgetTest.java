@@ -68,7 +68,7 @@ class V1BudgetTest {
         var bad = mutate(root -> replaceLineSegments(root, 0, "text", "识".repeat(38) + " ".repeat(9)));
 
         assertThat(errorsOf(bad)).contains(
-                "V1/题干宽: problem.lines[0] 估宽 2148px 超出题干面板预算（缩放 0.592 低于下限 0.6，渲染必溢出）");
+                "V1/题干宽: problem.lines[0] 估宽 2148px 超出题干面板预算（缩放 0.592 低于下限 0.6，渲染必溢出）；修复指引：把该行拆分为多行（选项各占一行）");
     }
 
     @Test
@@ -77,7 +77,7 @@ class V1BudgetTest {
         var bad = mutate(root -> replaceLineSegments(root, 0, "math", "f".repeat(80)));
 
         assertThat(errorsOf(bad)).contains(
-                "V1/题干宽: problem.lines[0] 估宽 2208px 超出题干面板预算（缩放 0.576 低于下限 0.6，渲染必溢出）");
+                "V1/题干宽: problem.lines[0] 估宽 2208px 超出题干面板预算（缩放 0.576 低于下限 0.6，渲染必溢出）；修复指引：把该行拆分为多行（选项各占一行）");
     }
 
     @Test
@@ -94,7 +94,21 @@ class V1BudgetTest {
         });
 
         assertThat(errorsOf(bad)).contains(
-                "V1/题干宽: problem.lines[0] 估宽 2121px 超出题干面板预算（缩放 0.600 低于下限 0.6，渲染必溢出）");
+                "V1/题干宽: problem.lines[0] 估宽 2121px 超出题干面板预算（缩放 0.600 低于下限 0.6，渲染必溢出）；修复指引：把该行拆分为多行（选项各占一行）");
+    }
+
+    @Test
+    @DisplayName("R-宽度①驳回消息尾缀（T23）：题干宽违规一律带修复指引（拆行/选项成行），既有「题干」路由令牌不受追加文案影响")
+    void problemLine_messageCarriesFixGuidance() throws Exception {
+        var bad = mutate(root -> replaceLineSegments(root, 0, "text", "识".repeat(38) + " ".repeat(9)));
+
+        var widthErrors = errorsOf(bad).stream().filter(e -> e.startsWith("V1/题干宽:")).toList();
+
+        assertThat(widthErrors).as("违规照报").isNotEmpty();
+        assertThat(widthErrors).allMatch(e -> e.startsWith("V1/题干宽: problem.lines[0] 估宽"),
+                "消息头（含路由令牌「题干」）保持原状");
+        assertThat(widthErrors).allMatch(e -> e.endsWith("；修复指引：把该行拆分为多行（选项各占一行）"),
+                "尾缀修复指引逐字追加在消息末尾");
     }
 
     // ---- R-宽度② 列表高度 ----

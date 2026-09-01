@@ -15,7 +15,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 分片 prompt 漂移守护（T6 评审 M 项起源，T18 分片生成重构<b>有意更新</b>，T20b 再重录：
- * COORDINATOR 末尾追加题型骨架段，golden few-shot 示例段零变化断言保留）：
+ * COORDINATOR 末尾追加题型骨架段，T23 三重重录：EXTRACT 追加选项成行/长句拆行规则与
+ * 选择题 few-shot、PROBLEM_SLICE 末尾追加行宽预算段（R1 修复轮：行数条款改为「以输入为
+ * 准、不得自行增删行」，与保真红线/工位校验对齐），其余常量 golden few-shot 示例段
+ * 零变化断言保留）：
  * golden（封版模板 template/src/data/content.json，只读单源）few-shot 必须在分片 prompt
  * 中逐字注入——题干片吃 golden problem 段、素材片吃 golden 四段素材、场景片吃 golden
  * scenes 切片（s10..s14）、协调者吃 golden 派生骨架（条数/锚点/全部场景 id）。
@@ -38,7 +41,7 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("PROBLEM_SLICE 与 golden 同步：题干首行 text 段逐字注入")
+    @DisplayName("PROBLEM_SLICE 与 golden 同步：题干首行 text 段逐字注入（T23 有意重录：末尾追加行宽预算段，golden few-shot 零变化断言保留）")
     void problemSlicePromptStaysInSyncWithGolden() throws Exception {
         JsonNode firstLine = MAPPER.readTree(goldenFile.toFile()).path("problem").path("lines").path(0);
         List<String> textValues = new ArrayList<>();
@@ -51,6 +54,48 @@ class PromptsDriftGuardTest {
         for (String value : textValues) {
             assertThat(Prompts.PROBLEM_SLICE).as("题干片 few-shot 应含 golden 首行文本 %s", value).contains(value);
         }
+    }
+
+    @Test
+    @DisplayName("T23：EXTRACT 追加选项成行/长句拆行两条规则 + 选择题 few-shot 示例（L1 题干含数学段、L2..L5 选项各一行）")
+    void extractPromptCarriesOptionRowAndWrapRules() {
+        assertThat(Prompts.EXTRACT)
+                .as("选项行规则（事故 0a988be5：整题被压成一行 → V1 拦杀 4 轮白烧）")
+                .contains("- 选项行：选择题的选项（A. B. C. D. 等）每项必须独立成行，禁止与题干同行、禁止多选项挤一行")
+                .as("行长规则（观感 40 汉字口径，宁多勿挤）")
+                .contains("- 行长：每行是画面上的一行排版，长句必须拆行（观感每行不超过约 40 个汉字），拆行永远合法、宁多勿挤")
+                .as("选择题 few-shot 示例存在：四个选项 A./B./C./D. 各占一行（L2..L5）")
+                .contains("\"id\": \"L2\", \"segments\": [{\"type\": \"text\", \"value\": \"A. \"}")
+                .contains("\"id\": \"L3\", \"segments\": [{\"type\": \"text\", \"value\": \"B. \"}")
+                .contains("\"id\": \"L4\", \"segments\": [{\"type\": \"text\", \"value\": \"C. \"}")
+                .contains("\"id\": \"L5\", \"segments\": [{\"type\": \"text\", \"value\": \"D. \"}")
+                .as("题干行含数学 segment（分段规则与既有示例同口径）")
+                .contains("{\"type\": \"math\", \"value\": \"f(x)=x^{2}+2x\"}");
+        // 追加位置：两条规则在既有「文字与数学交替处必须切成相邻 segment」之后
+        assertThat(Prompts.EXTRACT.indexOf("- 选项行："))
+                .as("规则追加在既有分段规则之后")
+                .isGreaterThan(Prompts.EXTRACT.indexOf("文字与数学交替处必须切成相邻 segment"));
+        assertThat(Prompts.EXTRACT.indexOf("示例（选择题）"))
+                .as("选择题示例追加在既有示例之后")
+                .isGreaterThan(Prompts.EXTRACT.indexOf("示例："));
+    }
+
+    @Test
+    @DisplayName("T23/R1：PROBLEM_SLICE 末尾追加行宽预算规则（1272px/26px/16px 粗估口径、行数以输入为准不自行增删行、行拆分职责归审题工位）")
+    void problemSlicePromptCarriesLineWidthBudgetRule() {
+        assertThat(Prompts.PROBLEM_SLICE)
+                .as("行宽预算规则逐字（数值与 T20a V1Budget 题干宽预算单源语义）")
+                .contains("行宽预算：")
+                .contains("- 每行宽度预算：一行在 1920 宽画面题干面板内最大可容 1272px；估算口径=中文/全角字符按 26px、"
+                        + "数学 LaTeX 源码码点按 16px 粗估；超预算必须把该行拆成多行，选项（A./B./C./D.）各自独立成行；"
+                        + "行数与行文顺序以输入为准（保真规则不变），行宽预算（每行最大 1272px，中文/全角 26px、数学 LaTeX 码点 16px 粗估）"
+                        + "是你理解输入行形状的依据；若发现输入某行超宽，照实排版，不得自行增删行——行拆分是审题工位的职责。")
+                .as("R1 修复轮裁定：行数可增表述已删除，行数语义与保真红线/工位校验一致")
+                .doesNotContain("行数可以比输入多")
+                .doesNotContain("拆行是你的排版职责");
+        assertThat(Prompts.PROBLEM_SLICE.indexOf("行宽预算"))
+                .as("追加只在常量末尾：行宽预算段在 golden few-shot 示例段之后")
+                .isGreaterThan(Prompts.PROBLEM_SLICE.indexOf("示例："));
     }
 
     @Test
