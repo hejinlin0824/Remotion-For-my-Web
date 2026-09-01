@@ -79,7 +79,8 @@ import java.util.function.IntConsumer;
  *       FatalExtractException / TtsFatalException / 预算尽 → FAILED（errorMessage + lastError=堆栈尾
  *       2000 字符 + workspace 保留 + 回调）。</li>
  *   <li><b>DONE</b>（渲染收尾）：artifactsDir 以绝对路径落库（GET /video 按 artifactsDir 直读 final.mp4，
- *       与 JobService.videoPath 对齐）、workspace 清理（artifacts 保留）、可选回调。</li>
+ *       与 JobService.videoPath 对齐）、TTS 行音频保留至 artifacts（T22，尽力而为）、workspace 清理
+ *       （artifacts 保留）、可选回调。</li>
  * </ul>
  */
 @Component
@@ -672,9 +673,43 @@ public class JobOrchestrator {
                     saved == null ? "行缺失" : saved.getStatus());
             return saved;
         }
+        keepTtsLinesQuietly(job.getId(), artifacts);   // T22：DONE 后成片之外保留 TTS 行音频（尽力而为）
         cleanupWorkspaceQuietly(job.getId());
         deferCallback(job, JobStatus.DONE, null, ctx);   // I3：闸外发（loop 层）
         return null;
+    }
+
+    /**
+     * DONE 后保留 TTS 行音频（Task 22 存储清理补全）：workspace/{jobId}/public/audio/lines/ 整目录
+     * {@link Files#move}（同卷 rename）到 artifacts/{jobId}/audio/lines/（保留 lines/ 子目录名的溯源
+     * 语义），随后工作区照旧整删——用户指令「生成结束后只保留视频 + TTS 资产」；public/audio/fixed
+     * 是模板静态件（template/public/audio/fixed 可随时再拷）不保留。
+     *
+     * <p>尽力而为语义：开关关闭（app.cleanup.keep-tts-audio=false）与旧行为完全一致；源目录不存在
+     * （异常早夭路径）静默跳过；目标 artifacts/{jobId}/audio 已存在目录（视为上次已保留）跳过；
+     * 其余失败 warn 落日志（带 jobId 与原因）后照常执行 {@link #cleanupWorkspaceQuietly}——音频已
+     * 合入成片音轨，单独 wav 丢失不损成片，绝不影响 DONE 落库与回调语义（异常就地消化，不穿出终态收尾）。</p>
+     */
+    private void keepTtsLinesQuietly(String jobId, Path artifactsDir) {
+        if (!props.getCleanup().isKeepTtsAudio()) {
+            return;
+        }
+        Path source = wsLinesDir(jobId);
+        if (!Files.isDirectory(source)) {
+            return;   // 源不存在（异常早夭路径）：静默跳过
+        }
+        Path audioDir = artifactsDir.resolve("audio");
+        if (Files.isDirectory(audioDir)) {
+            log.info("job={} artifacts audio 已存在（视为上次已保留），跳过 TTS 行音频移动", jobId);
+            return;
+        }
+        try {
+            Files.createDirectories(audioDir);   // Files.move 不建中间目录：先立 artifacts/{jobId}/audio
+            Files.move(source, audioDir.resolve("lines"));
+            log.info("job={} TTS 行音频已保留至 {}（工作区照常清理）", jobId, audioDir.resolve("lines"));
+        } catch (IOException | RuntimeException e) {
+            log.warn("job={} TTS 行音频保留失败（不损成片，继续清理工作区）：{}：{}", jobId, audioDir, e.getMessage());
+        }
     }
 
     private Job doCancel(Job job, Ctx ctx) {

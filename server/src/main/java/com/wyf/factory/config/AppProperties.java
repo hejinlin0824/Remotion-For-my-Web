@@ -23,6 +23,19 @@ public class AppProperties {
     private final Tts tts = new Tts();
     private final Qa qa = new Qa();
     private final Retry retry = new Retry();
+    private final Cleanup cleanup = new Cleanup();
+
+    /** 存储清理配置（T22：DONE 后只保留视频 + TTS 资产，其余过程性内容清除） */
+    public static class Cleanup {
+        /**
+         * DONE 后保留 TTS 行音频（默认 true）：workspace/{jobId}/public/audio/lines/ 整目录移动到
+         * artifacts/{jobId}/audio/lines/ 后再清理工作区；false = 旧行为完全一致（工作区整删不保留）。
+         */
+        private boolean keepTtsAudio = true;
+
+        public boolean isKeepTtsAudio() { return keepTtsAudio; }
+        public void setKeepTtsAudio(boolean keepTtsAudio) { this.keepTtsAudio = keepTtsAudio; }
+    }
 
     /** 渲染资源配置 */
     public static class Render {
@@ -120,4 +133,5 @@ public class AppProperties {
     public Tts getTts() { return tts; }
     public Qa getQa() { return qa; }
     public Retry getRetry() { return retry; }
+    public Cleanup getCleanup() { return cleanup; }
 }

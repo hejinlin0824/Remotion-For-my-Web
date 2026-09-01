@@ -8,6 +8,7 @@ import com.wyf.factory.domain.JobReviewError;
 import com.wyf.factory.domain.JobStatus;
 import com.wyf.factory.domain.StageHistoryEntry;
 import com.wyf.factory.glm.GlmException;
+import com.wyf.factory.render.ProcessRunner;
 import com.wyf.factory.render.QaFrameCheck;
 import com.wyf.factory.render.RenderWorker;
 import com.wyf.factory.render.WorkspaceManager;
@@ -23,6 +24,9 @@ import com.wyf.factory.validate.V2Fidelity;
 import com.wyf.factory.validate.V3Refs;
 import com.wyf.factory.validate.V4Judge;
 import com.wyf.factory.validate.ValidationResult;
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -34,6 +38,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.slf4j.LoggerFactory;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 
 import java.nio.file.Files;
@@ -54,7 +59,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -1220,5 +1227,164 @@ class JobOrchestratorTest {
         assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
         assertThat(job.getProcessingDeadlineAt()).isEqualTo(planted);   // 任何阶段进入/回环都不改写全局死线
         verify(callbackClient).notify(eq(CALLBACK_URL), any());
+    }
+
+    // ---- 23. Task 22：DONE 后保留 TTS 行音频（存储清理补全——成片之外只留真实合成产物） ----
+
+    private Path artifactsAudioDir() {
+        return Path.of(props.getArtifactsDir()).resolve(JOB_ID).resolve("audio");
+    }
+
+    /**
+     * Task 22 harness：mock 的 WorkspaceManager.cleanup 不动盘——桥接真删树（真实 WorkspaceManager
+     * 按同一 props 定位 workspace/{jobId}；假工作区无 junction，ProcessRunner 不会被触碰），
+     * 让「workspace 根已删」成为可断言的盘面事实。
+     */
+    private void stubCleanupDeletesWorkspaceForReal() throws Exception {
+        WorkspaceManager real = new WorkspaceManager(mock(ProcessRunner.class), props);
+        doAnswer(inv -> {
+            real.cleanup(JOB_ID);
+            return null;
+        }).when(workspaceManager).cleanup(JOB_ID);
+    }
+
+    /** Task 22 harness：渲染替身真正落盘 final.mp4（mock 默认只返回路径不写盘），供「final.mp4 仍在」断言。 */
+    private void stubRenderWritesFinalForReal() throws Exception {
+        when(renderWorker.render(any(Path.class), any())).thenAnswer(inv -> {
+            Files.createDirectories(artifactsFinal().getParent());
+            Files.write(artifactsFinal(), RENDERED_MP4_BYTES);
+            return artifactsFinal();
+        });
+    }
+
+    /** 预置 workspace/{jobId}/public/audio/lines/line_01.wav（模拟 TTS 已把行音频写进工作区副本）。 */
+    private void presetWorkspaceLinesWav() throws java.io.IOException {
+        Files.createDirectories(wsPath().resolve("public/audio/lines"));
+        Files.write(wsPath().resolve("public/audio/lines/line_01.wav"), WAV_BYTES);
+    }
+
+    private static final byte[] RENDERED_MP4_BYTES = {9, 8, 7, 6};
+
+    @Test
+    @DisplayName("T22：DONE → lines wav 保留至 artifacts/{id}/audio/lines/ 且内容=原文件，workspace 根已删，final.mp4 仍在（fixed 模板静态件不保留）")
+    void done_preservesLinesWavInArtifacts_workspaceDeleted_finalUntouched() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        stubRenderWritesFinalForReal();
+        stubCleanupDeletesWorkspaceForReal();
+        presetWorkspaceLinesWav();
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        Path preserved = artifactsAudioDir().resolve("lines").resolve("line_01.wav");
+        assertThat(preserved).hasBinaryContent(WAV_BYTES);        // 内容 = 原合成文件
+        assertThat(wsPath()).doesNotExist();                       // workspace 根已删
+        assertThat(artifactsFinal()).hasBinaryContent(RENDERED_MP4_BYTES);   // final.mp4 路径零触碰
+        assertThat(artifactsAudioDir().resolve("fixed")).doesNotExist();   // 范围裁定：模板静态件不保留
+    }
+
+    @Test
+    @DisplayName("T22：开关=false → artifacts 无 audio、workspace 已删（现状回归，与旧行为完全一致）")
+    void keepTtsAudioDisabled_noPreservation_legacyBehavior() throws Exception {
+        props.getCleanup().setKeepTtsAudio(false);
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        stubRenderWritesFinalForReal();
+        stubCleanupDeletesWorkspaceForReal();
+        presetWorkspaceLinesWav();
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        assertThat(artifactsAudioDir()).doesNotExist();   // 不产生 audio 保留
+        assertThat(wsPath()).doesNotExist();               // workspace 照删
+        assertThat(artifactsFinal()).exists();
+    }
+
+    @Test
+    @DisplayName("T22：源 lines 目录缺失（异常早夭路径）→ DONE 照常完成、无异常穿出、无保留、workspace 已删")
+    void sourceLinesDirMissing_doneStillCompletes_noException() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        stubRenderWritesFinalForReal();
+        stubCleanupDeletesWorkspaceForReal();
+        // 不预置 lines wav（也不建 workspace 目录）——源目录不存在
+
+        assertThatCode(() -> orchestrator.process(JOB_ID)).doesNotThrowAnyException();
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        assertThat(artifactsAudioDir()).doesNotExist();   // 静默跳过，不制造空壳目录
+        assertThat(wsPath()).doesNotExist();
+        assertThat(artifactsFinal()).exists();
+    }
+
+    @Test
+    @DisplayName("T22：移动失败注入（artifacts/{id}/audio 预置为同名文件迫使 Files.move 失败）→ DONE 照常、warn 落日志、workspace 照删、成片无恙")
+    void moveFailure_warnLogged_doneAndCleanupUnaffected() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        stubRenderWritesFinalForReal();
+        stubCleanupDeletesWorkspaceForReal();
+        presetWorkspaceLinesWav();
+        Files.createDirectories(artifactsAudioDir().getParent());
+        Files.writeString(artifactsAudioDir(), "not-a-directory");   // audio 为普通文件 → move 必败
+
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(JobOrchestrator.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            orchestrator.process(JOB_ID);
+        } finally {
+            logger.detachAppender(appender);
+        }
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);   // 绝不影响 DONE 落库与回调语义
+        assertThat(appender.list).anySatisfy(event -> assertThat(event.getLevel())
+                .isEqualTo(Level.WARN)
+                .describedAs("warn 事件 %s", event.getFormattedMessage()));
+        assertThat(appender.list)
+                .anySatisfy(event -> assertThat(event.getFormattedMessage())
+                        .contains("TTS 行音频保留失败").contains(JOB_ID));
+        assertThat(wsPath()).doesNotExist();               // workspace 照删
+        assertThat(artifactsFinal()).hasBinaryContent(RENDERED_MP4_BYTES);   // 成片无恙
+        verify(callbackClient).notify(eq(CALLBACK_URL), any());   // 回调照发
+    }
+
+    @Test
+    @DisplayName("T22：CANCELLED 路径回归——不产生 audio 保留（用户主动放弃，现状不变）")
+    void cancelledPath_noTtsAudioPreserved() throws Exception {
+        Job job = claimedJob();
+        AtomicInteger reads = new AtomicInteger();
+        when(repo.findById(JOB_ID)).thenAnswer(inv -> {
+            if (reads.incrementAndGet() == 4) {
+                job.setCancelRequested(true);   // GENERATING 之后、REVIEWING 之前取消落库
+            }
+            return Optional.of(job);
+        });
+        when(repo.save(any())).thenAnswer(returnsFirstArg());
+        stubStationsOk();
+        stubRenderWritesFinalForReal();
+        stubCleanupDeletesWorkspaceForReal();
+        presetWorkspaceLinesWav();
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.CANCELLED);
+        assertThat(Path.of(props.getArtifactsDir()).resolve(JOB_ID)).doesNotExist();   // 不产 artifacts 更无 audio
+        assertThat(wsPath()).doesNotExist();   // workspace 照删
+        verify(workspaceManager).cleanup(JOB_ID);
+    }
+
+    @Test
+    @DisplayName("T22：app.cleanup.keep-tts-audio 默认绑定 true（DONE 后保留 TTS 行音频的配置基线）")
+    void cleanupKeepTtsAudio_defaultIsTrue() {
+        assertThat(new AppProperties().getCleanup().isKeepTtsAudio()).isTrue();
     }
 }

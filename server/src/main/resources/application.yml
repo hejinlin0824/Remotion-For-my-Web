@@ -32,3 +32,5 @@ app:
     content-max: 3
     gen-deadline-minutes: 30   # T15b②：GENERATING 墙钟死线（进阶段落库 now+值，重试撞线直接判死）
     wall-clock-deadline-minutes: 60   # T21：全局处理墙钟死线（首次进 EXTRACTING 落库 now+值；超线即 FAILED 作废，QUEUED 不计时，回环不刷新）
+  cleanup:
+    keep-tts-audio: true   # T22：DONE 后保留 TTS 行音频（移动到 artifacts/{jobId}/audio/lines/）；false=工作区整删不保留（旧行为）
