@@ -163,4 +163,23 @@ public class JobService {
             return Files.exists(mp4) ? Optional.of(mp4) : Optional.empty();
         });
     }
+
+    /**
+     * 识图结果定位（T26，模式对齐 {@link #videoPath}）：artifacts/{id}/extracted.json 已落盘 → 路径，
+     * 只读展示（前端识图卡片 KaTeX 可视化 + 修改后重测）。
+     * 任务不存在 → 404 job not found；未落盘（QUEUED/EXTRACTING 中/落盘失败）→ 404 识图结果未生成。
+     * 无 DONE 门禁（与 videoPath 刻意不同）：T26 起 artifacts 保留白名单扩为三件套
+     * （final.mp4 + audio/lines + extracted.json），FAILED/CANCELLED 也保留，失败同样能回看识图内容。
+     */
+    public Path extractedJson(String id) {
+        Job job = repo.findById(id).orElseThrow(() -> new GlobalExceptionHandler.ApiException(404, "job not found"));
+        String dir = job.getArtifactsDir() != null
+                ? job.getArtifactsDir()
+                : props.getArtifactsDir() + "/" + job.getId();
+        Path json = Path.of(dir, "extracted.json");
+        if (!Files.isRegularFile(json)) {
+            throw new GlobalExceptionHandler.ApiException(404, "识图结果未生成");
+        }
+        return json;
+    }
 }

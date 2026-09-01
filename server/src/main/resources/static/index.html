@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>考研数学讲题工厂</title>
+<!-- T26：KaTeX 本地 vendored（template/node_modules/katex/dist 只读拷出，零 CDN 外链离线可用） -->
+<link rel="stylesheet" href="katex/katex.min.css">
+<script src="katex/katex.min.js"></script>
 <style>
   :root {
     --line: #d8dee6; --bg: #f5f7fa; --card: #ffffff; --ink: #1f2933;
@@ -92,6 +95,22 @@
   }
   video { width: 100%; max-height: 480px; background: #000; border-radius: 8px; }
   #video-meta { color: var(--muted); font-size: 13px; margin-top: 8px; }
+  /* 识图卡片（T26）：审题产物 KaTeX 可视化 + 修改后重测 */
+  #extract-section h2 { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  #extract-type { color: var(--muted); font-size: 13px; font-weight: 400; }
+  #extract-body { display: flex; flex-direction: column; gap: 6px; }
+  .ex-line { display: flex; gap: 10px; align-items: baseline; }
+  .ex-id { color: var(--muted); font-size: 12px; font-family: Consolas, Menlo, monospace; flex: none; }
+  .ex-body { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; }
+  .ex-math-bad { color: var(--bad); border: 1px solid #f3b4b4; border-radius: 4px; padding: 0 4px; }
+  .ex-hint { color: var(--muted); font-size: 12px; }
+  .ex-actions { margin-top: 10px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .katex { font-size: 1.08em; }
+  /* 进度区转存提示（T26「修改后重测」解除跟踪后的去向说明） */
+  #transfer-note {
+    background: #eff5ff; border: 1px solid #bfd4ff; border-radius: 7px;
+    padding: 10px 12px; font-size: 13px; color: var(--brand); margin-top: 12px;
+  }
 </style>
 </head>
 <body>
@@ -143,6 +162,7 @@
     <div class="stage-meta"><span id="stage-label"></span> · <span id="elapsed-label"></span> · <span id="job-meta"></span></div>
     <ul id="stage-list"></ul>
     <div id="retry-box" hidden></div>
+    <div id="transfer-note" hidden>识图内容已转存到输入区（文字题目页签），可修改后重新提交；本页已停止跟踪该任务进度。</div>
     <div class="row" id="cancel-row">
       <button type="button" id="cancel-btn" class="danger" hidden>取消任务</button>
       <span id="cancel-msg" class="err" hidden></span>
@@ -158,6 +178,16 @@
         </table>
       </div>
       <div class="row"><button type="button" id="again-btn" class="primary">再提一单</button></div>
+    </div>
+  </section>
+
+  <!-- 区 2.5：识图内容（T26：审题产物 KaTeX 可视化，TEXT/IMAGE 输入都显示；失败保留可回看） -->
+  <section id="extract-section" class="card" hidden>
+    <h2>识图内容 <span id="extract-type"></span></h2>
+    <div id="extract-body"></div>
+    <div class="ex-actions">
+      <button type="button" id="retest-btn">修改后重测</button>
+      <span class="ex-hint">把识图结果转存为文字题目（math 段包 $…$）供编辑重提；原任务仍在后台运行，可取消。</span>
     </div>
   </section>
 
@@ -215,6 +245,8 @@ var pollTimer = null;
 var tickTimer = null;
 var inputType = 'TEXT';
 var imageBase64 = '';
+var extracted = null;        /* T26：识图结果（extracted.json 原体） */
+var extractedLoaded = false; /* T26：200 后停止重拉（404 静默下轮重试） */
 
 function $(id) { return document.getElementById(id); }
 
@@ -313,6 +345,8 @@ function attach(id) {
   $('fail-tbody').innerHTML = '';
   $('cancel-msg').hidden = true;
   $('poll-msg').hidden = true;
+  resetExtracted();
+  $('transfer-note').hidden = true;
   resetPlayer();
   $('video-meta').textContent = '';
   $('player-section').hidden = true;
@@ -347,6 +381,7 @@ function poll() {
     if (!res.ok || !res.v || !res.v.status) { schedulePoll(); return; } /* 瞬时故障：继续轮询 */
     job = res.v;
     renderProgress(job);
+    maybeFetchExtracted(job);   /* T26：进 GENERATING 及之后拉识图结果（404 静默下轮重试） */
     if (TERMINAL.indexOf(job.status) >= 0) finish(job);
     else schedulePoll();
   }).catch(function () { schedulePoll(); }); /* 网络抖动：继续轮询 */
@@ -503,6 +538,7 @@ function finish(v) {
   $('cancel-btn').hidden = true;
   $('cancel-tag').hidden = true;
   setBusy(false); /* 终态即不在进行中，允许提交下一单 */
+  maybeFetchExtracted(v); /* 终态也补拉一次（T26 白名单终态保留：失败也能回看识图内容） */
   if (v.status === 'DONE') {
     renderPlayer(v);
   } else {
@@ -557,6 +593,96 @@ function again() {
   $('player-section').hidden = true;
   resetPlayer();
   $('fail-panel').hidden = true;
+  resetExtracted();
+  $('transfer-note').hidden = true;
+  setBusy(false);
+  window.scrollTo(0, 0);
+}
+/* 清空识图卡片（attach/again 复位）：容器、题型小字与显隐全回默认 */
+function resetExtracted() {
+  extracted = null;
+  extractedLoaded = false;
+  $('extract-body').innerHTML = '';
+  $('extract-type').textContent = '';
+  $('extract-section').hidden = true;
+}
+
+/* ===== 识图内容（T26）：拉取 / KaTeX 可视化 / 修改后重测 ===== */
+function maybeFetchExtracted(v) {
+  if (extractedLoaded || !jobId) return;
+  if (!v || v.status === 'QUEUED' || v.status === 'EXTRACTING') return; /* 未落盘窗口：下轮重试 */
+  fetch(API + '/' + encodeURIComponent(jobId) + '/extracted').then(function (r) {
+    if (r.status === 404) return null;   /* 未落盘/落盘失败：静默，下轮重试 */
+    return r.ok ? r.json() : null;
+  }).then(function (data) {
+    if (!data || extractedLoaded) return;
+    extractedLoaded = true;   /* 200 后停止重拉 */
+    renderExtracted(data);
+  }).catch(function () { /* 网络抖动：下轮重试 */ });
+}
+function renderExtracted(data) {
+  extracted = data;
+  var box = $('extract-body');
+  box.innerHTML = '';
+  var lines = (data && data.lines) ? data.lines : [];
+  lines.forEach(function (line) {
+    var row = document.createElement('span');
+    row.className = 'ex-line';
+    var id = document.createElement('span');
+    id.className = 'ex-id';
+    id.textContent = (line && line.id) || '';
+    row.appendChild(id);
+    var body = document.createElement('span');
+    body.className = 'ex-body';
+    ((line && line.segments) || []).forEach(function (seg) {
+      body.appendChild(renderSeg(seg));
+    });
+    row.appendChild(body);
+    box.appendChild(row);
+  });
+  $('extract-type').textContent = (data && data.problemType) ? ('题型：' + data.problemType) : '';
+  $('retest-btn').hidden = !lines.length;
+  $('extract-section').hidden = false;
+}
+/* 单段渲染：text → 纯文本；math → katex.render（throwOnError:false，失败显示原文+红标） */
+function renderSeg(seg) {
+  var s = document.createElement('span');
+  var value = (seg && seg.value != null) ? String(seg.value) : '';
+  if (seg && seg.type === 'math') {
+    if (typeof katex !== 'undefined' && katex.render) {
+      try {
+        katex.render(value, s, { throwOnError: false });
+        return s;
+      } catch (e) { /* 落到原文+红标 */ }
+    }
+    s.className = 'ex-math-bad';
+    s.textContent = '$' + value + '$';
+    return s;
+  }
+  s.textContent = value;
+  return s;
+}
+/* lines → 纯文本：text 段直拼；math 段包 $...$；行间 \n（TEXT 输入契约同源） */
+function extractLinesToText(data) {
+  var out = [];
+  ((data && data.lines) || []).forEach(function (line) {
+    var parts = '';
+    ((line && line.segments) || []).forEach(function (seg) {
+      if (!seg || seg.value == null) return;
+      parts += seg.type === 'math' ? ('$' + seg.value + '$') : String(seg.value);
+    });
+    out.push(parts);
+  });
+  return out.join('\n');
+}
+/* 修改后重测：识图内容转存 TEXT 输入区 → 解除当前任务跟踪（stopTimers+转存提示）→
+   提交按钮解锁，用户编辑后重新提交新单；原任务不受影响仍在后台运行 */
+function retestFromExtracted() {
+  if (!extracted) return;
+  $('q-text').value = extractLinesToText(extracted);
+  switchTab('TEXT');
+  stopTimers();
+  $('transfer-note').hidden = false;
   setBusy(false);
   window.scrollTo(0, 0);
 }
@@ -574,6 +700,7 @@ $('tab-image').addEventListener('click', function () { switchTab('IMAGE'); });
 $('submit-btn').addEventListener('click', submitJob);
 $('cancel-btn').addEventListener('click', cancelJob);
 $('again-btn').addEventListener('click', again);
+$('retest-btn').addEventListener('click', retestFromExtracted);
 $('img-clear').addEventListener('click', clearImage);
 $('q-image').addEventListener('change', function (e) { handleFile(e.target.files && e.target.files[0]); });
 var dz = $('drop-zone');

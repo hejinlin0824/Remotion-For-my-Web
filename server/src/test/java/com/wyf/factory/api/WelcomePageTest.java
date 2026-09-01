@@ -48,4 +48,17 @@ class WelcomePageTest {
         assertThat(html).doesNotContain("http://");
         assertThat(html).doesNotContain("https://");
     }
+
+    @Test
+    @DisplayName("T26 锚点：识图端点/KaTeX 本地渲染与 vendored 相对路径/修改后重测")
+    void containsT26ExtractionAnchors() throws IOException {
+        String html = page();
+        assertThat(html).contains("/extracted");          // 识图结果只读端点
+        assertThat(html).contains("katex.render");        // KaTeX 本地渲染识图内容
+        assertThat(html).contains("throwOnError");        // 宽容渲染（失败显示原文）
+        assertThat(html).contains("katex/katex.min.css"); // vendored KaTeX 相对路径引用
+        assertThat(html).contains("katex/katex.min.js");
+        assertThat(html).contains("修改后重测");           // 转存输入区重测按钮
+        assertThat(html).contains("extractLinesToText");  // lines→纯文本（math 包 $…$）
+    }
 }

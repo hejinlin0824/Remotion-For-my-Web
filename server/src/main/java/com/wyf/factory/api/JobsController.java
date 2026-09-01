@@ -28,7 +28,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * REST API v1（spec §13）六端点 + review-errors 观测端点（T19a）：入队 / 批量入队 / 单查 / 列表 / 取消 / 视频流 / 错误清单。
+ * REST API v1（spec §13）六端点 + review-errors 观测端点（T19a）+ extracted 识图结果只读端点（T26）：
+ * 入队 / 批量入队 / 单查 / 列表 / 取消 / 视频流 / 错误清单 / 识图结果。
  * 校验在本层手写（不引 validation 依赖）；业务判定在 {@link JobService}；错误统一 {error} 形状。
  */
 @RestController
@@ -116,6 +117,16 @@ public class JobsController {
     @GetMapping("/{id}/review-errors")
     public List<ReviewErrorView> reviewErrors(@PathVariable String id) {
         return service.reviewErrors(id);
+    }
+
+    /** 8. 识图结果（T26）→ 200 extracted.json 原体（application/json）；job 不存在/未落盘 → 404 {error} */
+    @GetMapping("/{id}/extracted")
+    public ResponseEntity<Resource> extracted(@PathVariable String id) throws IOException {
+        Path json = service.extractedJson(id);
+        return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_JSON)
+                .contentLength(Files.size(json))
+                .body(new FileSystemResource(json));
     }
 
     /** 入队校验矩阵（spec §13 + Ruling-12 + D6），失败即 400 {error:原因} */

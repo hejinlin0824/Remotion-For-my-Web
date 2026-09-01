@@ -1358,7 +1358,7 @@ class JobOrchestratorTest {
     }
 
     @Test
-    @DisplayName("T22：CANCELLED 路径回归——不产生 audio 保留（用户主动放弃，现状不变）")
+    @DisplayName("T22+T26：CANCELLED 路径——不产生 audio 保留；extracted.json 保留（T26 白名单扩三件套：取消也回看识图内容）")
     void cancelledPath_noTtsAudioPreserved() throws Exception {
         Job job = claimedJob();
         AtomicInteger reads = new AtomicInteger();
@@ -1377,7 +1377,9 @@ class JobOrchestratorTest {
         orchestrator.process(JOB_ID);
 
         assertThat(job.getStatus()).isEqualTo(JobStatus.CANCELLED);
-        assertThat(Path.of(props.getArtifactsDir()).resolve(JOB_ID)).doesNotExist();   // 不产 artifacts 更无 audio
+        assertThat(artifactsExtracted()).exists();   // T26：识图结果保留（EXTRACT 成功即落盘，终态不清）
+        assertThat(artifactsAudioDir()).doesNotExist();   // 不产 audio 保留
+        assertThat(artifactsFinal()).doesNotExist();      // 无成片（渲染未发生）
         assertThat(wsPath()).doesNotExist();   // workspace 照删
         verify(workspaceManager).cleanup(JOB_ID);
     }
@@ -1386,5 +1388,90 @@ class JobOrchestratorTest {
     @DisplayName("T22：app.cleanup.keep-tts-audio 默认绑定 true（DONE 后保留 TTS 行音频的配置基线）")
     void cleanupKeepTtsAudio_defaultIsTrue() {
         assertThat(new AppProperties().getCleanup().isKeepTtsAudio()).isTrue();
+    }
+
+    // ---- 24. Task 26：识图结果落盘 artifacts/{id}/extracted.json（T22 白名单扩三件套） ----
+
+    private Path artifactsExtracted() {
+        return Path.of(props.getArtifactsDir()).resolve(JOB_ID).resolve("extracted.json");
+    }
+
+    @Test
+    @DisplayName("T26：EXTRACT 成功 → artifacts/{id}/extracted.json 落盘，内容=ExtractResult 原样（problemType+lines/segments）")
+    void extractSuccess_persistsExtractedJson() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        assertThat(artifactsExtracted()).exists();
+        assertThat(Files.readString(artifactsExtracted()))   // 原样 JSON 形状（非包装非转义）
+                .contains("\"problemType\"").contains("\"lines\"").contains("\"segments\"");
+        ExtractResult persisted = JSON.readValue(artifactsExtracted().toFile(), ExtractResult.class);
+        assertThat(persisted).isEqualTo(EXTRACT);   // 反序列化回读 = 原对象（record 逐字段相等）
+    }
+
+    @Test
+    @DisplayName("T26：断点续跑（盘上 content.json，ExtractResult 已丢）→ doReviewing 重建补写 extracted.json（幂等覆盖写）")
+    void resumeIntoReviewing_rebuildsExtractedJson() throws Exception {
+        Job job = claimedJobAt(JobStatus.REVIEWING);
+        stubRepo(job);
+        stubStationsOk();
+        stubRenderWritesFinalForReal();
+        presetResumeArtifacts();   // content.json + audio_meta.json + line wav（ExtractResult 不落库已丢）
+        Files.createDirectories(artifactsExtracted().getParent());
+        Files.writeString(artifactsExtracted(), "{\"stale\":true}");   // 旧内容将被幂等覆盖
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        assertThat(Files.readString(artifactsExtracted())).doesNotContain("stale");
+        ExtractResult persisted = JSON.readValue(artifactsExtracted().toFile(), ExtractResult.class);
+        assertThat(persisted.problemType()).isEqualTo("计算题");   // 与 content.json problem 段同源
+        assertThat(persisted.lines()).singleElement()
+                .satisfies(l -> assertThat(l.id()).isEqualTo("L1"));
+    }
+
+    @Test
+    @DisplayName("T26：GENERATING 断点重取审题（盘上无 content.json）→ ensureExtracted 重取后同步补写 extracted.json")
+    void resumeIntoGenerating_reExtract_persistsExtractedJson() throws Exception {
+        Job job = claimedJobAt(JobStatus.GENERATING);
+        stubRepo(job);
+        stubStationsOk();   // 不预置任何盘上断点产物 → ensureExtracted 走重取
+
+        orchestrator.process(JOB_ID);
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+        verify(extractStation, times(1)).extract(anyString());   // 确实走了重取
+        ExtractResult persisted = JSON.readValue(artifactsExtracted().toFile(), ExtractResult.class);
+        assertThat(persisted).isEqualTo(EXTRACT);
+    }
+
+    @Test
+    @DisplayName("T26：落盘失败注入（extracted.json 预置为同名目录迫使写盘失败）→ 主流程无恙照常 DONE、warn 落日志")
+    void persistExtractedFailure_doneStillCompletes_warnLogged() throws Exception {
+        Job job = claimedJob();
+        stubRepo(job);
+        stubStationsOk();
+        stubRenderWritesFinalForReal();
+        Files.createDirectories(artifactsExtracted());   // 同名目录 → writeString 必败
+
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(JobOrchestrator.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            orchestrator.process(JOB_ID);
+        } finally {
+            logger.detachAppender(appender);
+        }
+
+        assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);   // 尽力而为：绝不影响主流程
+        assertThat(appender.list).anySatisfy(event -> assertThat(event.getFormattedMessage())
+                .contains("识图结果落盘失败").contains(JOB_ID));
+        verify(callbackClient).notify(eq(CALLBACK_URL), any());   // 回调照发
     }
 }

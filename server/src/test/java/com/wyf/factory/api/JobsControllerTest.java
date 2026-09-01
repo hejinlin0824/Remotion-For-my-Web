@@ -483,6 +483,41 @@ class JobsControllerTest {
                 .andExpect(jsonPath("$.error").value("job not found"));
     }
 
+    // ---------------------------------------------------------------- GET /api/v1/jobs/{id}/extracted
+
+    @Test
+    @DisplayName("extracted 已落盘（T26）→ 200 application/json extracted.json 原体")
+    void extracted_ready_returnsJsonBody(@TempDir Path tempDir) throws Exception {
+        Path json = tempDir.resolve("extracted.json");
+        Files.writeString(json, "{\"problemType\":\"计算题\",\"lines\":[]}");
+        when(service.extractedJson("j1")).thenReturn(json);
+
+        mockMvc.perform(get("/api/v1/jobs/j1/extracted"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(content().json("{\"problemType\":\"计算题\",\"lines\":[]}"));
+    }
+
+    @Test
+    @DisplayName("extracted 未落盘（T26：QUEUED/EXTRACTING 中/落盘失败）→ 404 {error:'识图结果未生成'}")
+    void extracted_notPersisted_returns404() throws Exception {
+        when(service.extractedJson("j1")).thenThrow(new GlobalExceptionHandler.ApiException(404, "识图结果未生成"));
+
+        mockMvc.perform(get("/api/v1/jobs/j1/extracted"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("识图结果未生成"));
+    }
+
+    @Test
+    @DisplayName("extracted job 不存在 → 404 {error:'job not found'}")
+    void extracted_missingJob_returns404() throws Exception {
+        when(service.extractedJson("nope")).thenThrow(new GlobalExceptionHandler.ApiException(404, "job not found"));
+
+        mockMvc.perform(get("/api/v1/jobs/nope/extracted"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("job not found"));
+    }
+
     // ---------------------------------------------------------------- 兜底异常
 
     @Test
@@ -814,6 +849,45 @@ class JobsControllerTest {
                     .isInstanceOf(GlobalExceptionHandler.ApiException.class)
                     .hasFieldOrPropertyWithValue("status", 404);
             verify(reviewErrorRepo, never()).findByJobIdOrderByIdAsc("nope");   // 404 短路，不查子表
+        }
+
+        @Test
+        @DisplayName("extractedJson（T26）：文件在盘即返回路径（无 DONE 门禁，生成中已可读）；未落盘/任务不存在 → 404 ApiException")
+        void extractedJson_locatesFile_missingAndNotPersisted404(@TempDir Path tempDir) throws Exception {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            job.setStatus(JobStatus.GENERATING);   // 非 DONE：识图结果无定版门禁（与 videoPath 刻意不同）
+            job.setArtifactsDir(tempDir.toString());
+            when(repo.findById(job.getId())).thenReturn(java.util.Optional.of(job));
+            when(repo.findById("nope")).thenReturn(java.util.Optional.empty());
+
+            Files.writeString(tempDir.resolve("extracted.json"), "{\"problemType\":\"计算题\"}");
+            assertThat(realService.extractedJson(job.getId())).isEqualTo(tempDir.resolve("extracted.json"));
+
+            Files.delete(tempDir.resolve("extracted.json"));   // 未落盘（EXTRACTING 中/落盘失败）
+            assertThatThrownBy(() -> realService.extractedJson(job.getId()))
+                    .isInstanceOf(GlobalExceptionHandler.ApiException.class)
+                    .hasMessageContaining("识图结果未生成")
+                    .hasFieldOrPropertyWithValue("status", 404);
+
+            assertThatThrownBy(() -> realService.extractedJson("nope"))
+                    .isInstanceOf(GlobalExceptionHandler.ApiException.class)
+                    .hasMessageContaining("job not found")
+                    .hasFieldOrPropertyWithValue("status", 404);
+        }
+
+        @Test
+        @DisplayName("extractedJson（T26）：artifactsDir 为 NULL 旧行 → 回退 props 目录定位，不 NPE")
+        void extractedJson_nullArtifactsDir_fallsBackToProps(@TempDir Path tempDir) throws Exception {
+            Job job = new Job();
+            job.setInputType("TEXT");
+            job.setId("legacy-1");
+            when(repo.findById("legacy-1")).thenReturn(java.util.Optional.of(job));
+            props.setArtifactsDir(tempDir.toString());   // 本嵌套类逐用例重建实例，props 设置不外溢
+
+            assertThatThrownBy(() -> realService.extractedJson("legacy-1"))   // props 目录下无 extracted.json
+                    .isInstanceOf(GlobalExceptionHandler.ApiException.class)
+                    .hasMessageContaining("识图结果未生成");
         }
     }
 

@@ -80,7 +80,7 @@ import java.util.function.IntConsumer;
  *       2000 字符 + workspace 保留 + 回调）。</li>
  *   <li><b>DONE</b>（渲染收尾）：artifactsDir 以绝对路径落库（GET /video 按 artifactsDir 直读 final.mp4，
  *       与 JobService.videoPath 对齐）、TTS 行音频保留至 artifacts（T22，尽力而为）、workspace 清理
- *       （artifacts 保留）、可选回调。</li>
+ *       （artifacts 保留——T22 白名单 final.mp4 + audio/lines，T26 扩为三件套 + extracted.json）、可选回调。</li>
  * </ul>
  */
 @Component
@@ -96,6 +96,9 @@ public class JobOrchestrator {
     static final int LAST_ERROR_TAIL = 2000;
     /** IMAGE 路径送 GLM 视觉通道的 mime（入队校验仅收 base64，统一按 PNG 提交）。 */
     private static final String IMAGE_MIME = "image/png";
+    /** T26：ExtractResult → extracted.json 序列化器（无状态，仅落盘一处使用）。 */
+    private static final com.fasterxml.jackson.databind.ObjectMapper EXTRACT_JSON =
+            new com.fasterxml.jackson.databind.ObjectMapper();
 
     /** 错误清单落库来源（T19a/T18）：V1-V4 驳回 / QA 审帧判负 / 分片失败（source=分片名 P0/P1/P2/P3:*）。 */
     static final String SRC_REVIEW = "REVIEW";
@@ -365,6 +368,7 @@ public class JobOrchestrator {
                     ? extractStation.extractImage(imagePayload(job), IMAGE_MIME)
                     : extractStation.extract(job.getInputText()));
             ctx.extracted = extracted;
+            persistExtractedQuietly(job.getId(), extracted);   // T26：识图结果落盘（尽力而为）
             return enterGenerating(job, "审题完成（" + extracted.problemType() + "）");
         } catch (ExtractStation.FatalExtractException fatal) {
             // 读不出题/非数学题：同素材重试无意义（spec §9），直接判死
@@ -463,6 +467,7 @@ public class JobOrchestrator {
      * 与 doReviewing 续跑同款取法）；盘上无 content.json（首轮生成中断/首轮驳回回环中断）则
      * 题干在 Job 上，重新审题（异常路由与 doExtracting 同款：FatalExtract 判死、GlmException
      * 走 extractRetries 预算）。修复前此场景生成载荷是字面 "null" 的盲跑。
+     * T26：两条重建路径（content.json 重建 / 重取审题）收敛后同步补写 extracted.json（幂等覆盖写）。
      *
      * @return job 继续推进；null = 已判死/待重试落库，本阶段停止
      */
@@ -470,21 +475,20 @@ public class JobOrchestrator {
         if (ctx.extracted != null) {
             return job;
         }
-        if (ctx.content != null) {
-            ctx.extracted = extractedFromProblem(ctx.content);
-            return job;
-        }
         try {
-            ctx.extracted = semaphores.withGlm(() -> "IMAGE".equals(job.getInputType())
-                    ? extractStation.extractImage(imagePayload(job), IMAGE_MIME)
-                    : extractStation.extract(job.getInputText()));
-            return job;
+            ctx.extracted = ctx.content != null
+                    ? extractedFromProblem(ctx.content)
+                    : semaphores.withGlm(() -> "IMAGE".equals(job.getInputType())
+                            ? extractStation.extractImage(imagePayload(job), IMAGE_MIME)
+                            : extractStation.extract(job.getInputText()));
         } catch (ExtractStation.FatalExtractException fatal) {
             failJob(job, fatal.getMessage(), fatal, ctx);
             return null;
         } catch (GlmException e) {
             return retryOrFail(job, e, "审题", job.getExtractRetries(), job::setExtractRetries, ctx);
         }
+        persistExtractedQuietly(job.getId(), ctx.extracted);   // T26：续跑重建/重取同步补写（幂等覆盖写）
+        return job;
     }
 
     /**
@@ -511,6 +515,7 @@ public class JobOrchestrator {
             // 断点续跑：ExtractResult 不可恢复，V2 以 content.json problem 段为基准（记录 note）
             ctx.extracted = extractedFromProblem(ctx.content);
             ctx.extractedFromResume = true;
+            persistExtractedQuietly(job.getId(), ctx.extracted);   // T26：续跑重建同步补写（幂等覆盖写）
         }
         ValidationResult merged;
         try {
@@ -685,6 +690,10 @@ public class JobOrchestrator {
      * 语义），随后工作区照旧整删——用户指令「生成结束后只保留视频 + TTS 资产」；public/audio/fixed
      * 是模板静态件（template/public/audio/fixed 可随时再拷）不保留。
      *
+     * <p>T26 白名单扩展：artifacts 保留面自此为三件套 final.mp4 + audio/lines + extracted.json
+     * （识图结果，EXTRACT 成功即落盘 {@link #persistExtractedQuietly}，与终态无关地保留——
+     * 用户验收反馈：失败也要能回看识图内容）；本方法只负责 audio/lines 一件。</p>
+     *
      * <p>尽力而为语义：开关关闭（app.cleanup.keep-tts-audio=false）与旧行为完全一致；源目录不存在
      * （异常早夭路径）静默跳过；目标 artifacts/{jobId}/audio 已存在目录（视为上次已保留）跳过；
      * 其余失败 warn 落日志（带 jobId 与原因）后照常执行 {@link #cleanupWorkspaceQuietly}——音频已
@@ -709,6 +718,27 @@ public class JobOrchestrator {
             log.info("job={} TTS 行音频已保留至 {}（工作区照常清理）", jobId, audioDir.resolve("lines"));
         } catch (IOException | RuntimeException e) {
             log.warn("job={} TTS 行音频保留失败（不损成片，继续清理工作区）：{}：{}", jobId, audioDir, e.getMessage());
+        }
+    }
+
+    /**
+     * T26 识图结果落盘：EXTRACT 成功（或续跑重建）后把 ExtractResult 原样序列化写
+     * artifacts/{jobId}/extracted.json（{problemType, lines:[{id, segments:[{type,value}]}]}，
+     * GET /api/v1/jobs/{id}/extracted 的数据源，前端识图卡片 KaTeX 可视化）。
+     * 尽力而为语义（模式对齐 T22 keepTtsLinesQuietly）：目录创建/写盘失败仅 warn 落日志，
+     * 绝不影响主流程；幂等覆盖写（续跑重建路径重复触发安全）。
+     */
+    private void persistExtractedQuietly(String jobId, ExtractResult extracted) {
+        if (extracted == null) {
+            return;
+        }
+        Path file = artifactsExtracted(jobId);
+        try {
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, EXTRACT_JSON.writeValueAsString(extracted));
+            log.info("job={} 识图结果已落盘 {}", jobId, file);
+        } catch (IOException | RuntimeException e) {
+            log.warn("job={} 识图结果落盘失败（不影响主流程）：{}：{}", jobId, file, e.getMessage());
         }
     }
 
@@ -1100,6 +1130,11 @@ public class JobOrchestrator {
 
     private Path artifactsFinal(String jobId) {
         return Path.of(props.getArtifactsDir()).resolve(jobId).resolve("final.mp4");
+    }
+
+    /** T26：识图结果落盘位置 artifacts/{jobId}/extracted.json（props 口径，与 artifactsFinal 同款）。 */
+    private Path artifactsExtracted(String jobId) {
+        return Path.of(props.getArtifactsDir()).resolve(jobId).resolve("extracted.json");
     }
 
     private static String imagePayload(Job job) {
