@@ -160,7 +160,7 @@ public final class Prompts {
 
             卡片文字硬约束（防渲染溢出；实证多轮驳回同因，必须全部满足）：
             - 结论卡 = steps 最后一条的 derivation（画面以「结论」标签展示）：只允许一行短式最终结果，总长 ≤ 40 个字符，形状参考 a\\in[-\\sqrt{3},\\ \\sqrt{3}]；禁止多行推导、禁止换行、禁止 \\begin{aligned}、禁止长分式（\\frac 的分子或分母超过 4 个字符）
-            - 每步 derivation 是单行短公式：TeX 源码不超过 30 个字符（如 -\\frac{1}{2} \\le t \\le -\\frac{1}{4} 已是上限长度）；更长的推导必须拆成多个步骤/多条公式，禁止单条塞入整条不等式链或长表达式
+            - 每步 derivation 是单行短公式：TeX 源码不超过 30 个字符（如 -\\frac{1}{4} \\le t \\le 0 已是上限长度）；更长的推导必须拆成多个步骤/多条公式，禁止单条塞入整条不等式链或长表达式
             - generalMethod 每条：step 以「≤6 字标签：说明」开头（如「识别：可导函数加区间单调」），step 整行 ≤ 24 字，trick ≤ 40 字，step 与 trick 内不放公式
             - pitfalls 每条：claim ≤ 20 字，why ≤ 40 字
             - 反例（实证驳回同因，禁止）：结论卡 derivation 写成长式，渲染时等号后折行（"z =" 与 "2" 拆成两行）；step/标签过长竖向拆行、卡片文字出缘
@@ -269,7 +269,7 @@ public final class Prompts {
             - problem-card：props={}
             - knowledge-card：props={"knowledgeRef":N} → knowledge[N-1]（N 从 1 起）
             - step-card：props={"stepRef":N} → steps[N-1]
-            - derivation-popup：props={"stepRef":N,"formula":KaTeX 源码}，非空；formula 是单行短公式，TeX 源码不超过 31 个字符（如 -\\frac{1}{2} \\le t \\le -\\frac{1}{4} 已是上限长度）——默认逐字符照抄 steps[N-1].derivation，照抄会超出 31 个字符时改写为该步推导的关键主式，禁止整条塞入长不等式链
+            - derivation-popup：props={"stepRef":N,"formula":KaTeX 源码}，非空；formula 是单行短公式，TeX 源码不超过 31 个字符（如 -\\frac{1}{4} \\le t \\le 0 已是上限长度）——默认逐字符照抄 steps[N-1].derivation，照抄会超出 31 个字符时改写为该步推导的关键主式，禁止整条塞入长不等式链
             - pitfall-card：props={"pitfallRef":N} → pitfalls[N-1]
             - checklist-card：props={"pitfallRefs":[N,...]}（非空数组，逐项不越界）
             - general-list：props={"itemRef":N} → generalMethod[N-1]

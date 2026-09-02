@@ -279,7 +279,7 @@ class PromptsDriftGuardTest {
         // MATERIAL：与 V1Budget R-宽度③（steps 上限 60=golden 最长链）同病灶的上游收紧口径
         assertThat(Prompts.MATERIAL)
                 .as("步骤卡公式宽度规则逐字（30 字符为收紧目标，反例=事故不等式链形状）")
-                .contains("- 每步 derivation 是单行短公式：TeX 源码不超过 30 个字符（如 -\\frac{1}{2} \\le t \\le -\\frac{1}{4} 已是上限长度）；"
+                .contains("- 每步 derivation 是单行短公式：TeX 源码不超过 30 个字符（如 -\\frac{1}{4} \\le t \\le 0 已是上限长度）；"
                         + "更长的推导必须拆成多个步骤/多条公式，禁止单条塞入整条不等式链或长表达式");
         assertThat(Prompts.MATERIAL.indexOf("每步 derivation 是单行短公式"))
                 .as("追加在卡片文字硬约束指令段内、golden few-shot 示例段之前")
@@ -287,7 +287,7 @@ class PromptsDriftGuardTest {
         // SCENE：31 与 V1Budget.POPUP_FORMULA_MAX_CODE_POINTS 同数值（改写条款化解与照抄规则的冲突）
         assertThat(Prompts.SCENE)
                 .as("popup formula 上限逐字")
-                .contains("formula 是单行短公式，TeX 源码不超过 31 个字符（如 -\\frac{1}{2} \\le t \\le -\\frac{1}{4} 已是上限长度）")
+                .contains("formula 是单行短公式，TeX 源码不超过 31 个字符（如 -\\frac{1}{4} \\le t \\le 0 已是上限长度）")
                 .as("默认照抄保留（口播/画面一致机制锚点），超长改写有出路（golden s09 关键主式先例）")
                 .contains("默认逐字符照抄 steps[N-1].derivation")
                 .contains("照抄会超出 31 个字符时改写为该步推导的关键主式")
