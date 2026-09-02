@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -30,15 +31,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * GEN 分片流水线契约（T18）：全链打通（4 分片分组/合并完整性）/驳回路由映射表
- * （含「解析不出→全片」保守回退）/分片 GlmException 走 ShardGenException 通道
- * （编排器既有 retryOrFail 衔接）/轮内缓存复用与缺片补跑。
+ * GEN 分片流水线契约（T18 引入，T30 拆分重写）：全链打通（4 分片分组/合并完整性）/
+ * 驳回路由映射表（steps 令牌→P2a、knowledge/pitfalls/generalMethod 令牌→P2b，含条数变体；
+ * 「解析不出→全片」保守回退）/级联失效（P2a 重做⇒P2b⇒场景片；P2b 重做⇒场景片但 P2a 缓存保留）/
+ * 分片 GlmException 走 ShardGenException 通道（编排器既有 retryOrFail 衔接）/轮内缓存复用与缺片补跑
+ * /P2b 串行消费 P2a 成品 steps（上下文指令）。
  * 全 mock 工位 + 真信号量/真合并器，零 API 成本。
  */
 @ExtendWith(MockitoExtension.class)
@@ -73,10 +75,14 @@ class GenShardPipelineTest {
     /** golden 同构骨架：17 场（act2 4 / act3 10 / act4 3）→ 场景片 4 片（act3 拆两片均分）。 */
     private static final Skeleton GOLDEN_LIKE = goldenLikeSkeleton();
 
-    private static final Material MATERIAL = new Material(
+    /** P2a 成品（与 MATERIAL.steps() 同内容）。 */
+    private static final List<Material.Step> STEPS = List.of(
+            new Material.Step("L1", "s", "d", "n"), new Material.Step("L2", "s", "d", "n"),
+            new Material.Step("L3", "s", "d", "n"));
+
+    /** P2b 成品（三段；与 MATERIAL 的 steps 之外各段同内容）。 */
+    private static final MaterialShardStation.Rest REST = new MaterialShardStation.Rest(
             List.of(new Material.Knowledge("k", "f", "p", "t"), new Material.Knowledge("k", "f", "p", "t")),
-            List.of(new Material.Step("L1", "s", "d", "n"), new Material.Step("L2", "s", "d", "n"),
-                    new Material.Step("L3", "s", "d", "n")),
             List.of(new Material.Pitfall("c", "w")),
             List.of(new Material.MethodItem("st", "tr"), new Material.MethodItem("st", "tr"),
                     new Material.MethodItem("st", "tr")));
@@ -123,7 +129,8 @@ class GenShardPipelineTest {
         state = new GenShardPipeline.RoundState();
         when(coordinator.generate(any(), anyList())).thenReturn(SMALL);
         when(problemSlice.format(any(), anyList())).thenReturn(echoProblem());
-        when(materialShard.generate(any(), any(), anyList())).thenReturn(MATERIAL);
+        when(materialShard.generateCore(any(), any(), anyList())).thenReturn(STEPS);
+        when(materialShard.generateRest(any(), any(), anyList(), anyList())).thenReturn(REST);
         // 场景片按本片 plan 逐场产出（保证合并器轻校验可过）
         when(sceneShard.generate(any(), any(), anyList(), anyList(), anyList()))
                 .thenAnswer(inv -> scenesFor(inv.getArgument(2)));
@@ -156,7 +163,7 @@ class GenShardPipelineTest {
     // ---- 1. 全链打通：分组 + 合并完整性 ----
 
     @Test
-    @DisplayName("全链打通：P0→P1∥P2→4 场景片（act3>6 拆两片均分）→ 合并 content.json 完整且过轻校验")
+    @DisplayName("全链打通：P0→P1∥P2a→P2b（吃 P2a 成品 steps）→4 场景片（act3>6 拆两片均分）→ 合并完整过轻校验")
     void fullRun_goldenLikeGroups_mergedContentComplete() {
         when(coordinator.generate(any(), anyList())).thenReturn(GOLDEN_LIKE);
 
@@ -164,8 +171,8 @@ class GenShardPipelineTest {
 
         // 分片划分：act2 一片（4 场）/ act3 两片（5+5）/ act4 一片（3 场）
         // （并行执行，捕获顺序不定 → 整组 anyOrder 断言，片内顺序仍严格）
-        org.mockito.ArgumentCaptor<List<Skeleton.ScenePlan>> plans =
-                org.mockito.ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<List<Skeleton.ScenePlan>> plans =
+                ArgumentCaptor.forClass(List.class);
         verify(sceneShard, times(4)).generate(any(), any(), plans.capture(), anyList(), anyList());
         assertThat(plans.getAllValues()).containsExactlyInAnyOrder(
                 plansOf("s01", "s02", "s03", "s04"),
@@ -173,12 +180,17 @@ class GenShardPipelineTest {
                 plansOf("s10", "s11", "s12", "s13", "s14"),
                 plansOf("s15", "s16", "s17"));
 
+        // P2b 收到 P2a 成品 steps 作上下文（坑点/通法看着真 steps 写）
+        ArgumentCaptor<List<Material.Step>> stepsCtx = ArgumentCaptor.forClass(List.class);
+        verify(materialShard).generateRest(any(), any(), stepsCtx.capture(), anyList());
+        assertThat(stepsCtx.getValue()).isSameAs(STEPS);
+
         // 合并完整性：meta/problem/四段/scenes 全段位到位，scenes 顺序 = 骨架 plan 顺序
         assertThat(content.meta().aspect()).isEqualTo("16:9");
         assertThat(content.meta().problemType()).isEqualTo("计算题");
         assertThat(content.problem().lines()).hasSize(3);
         assertThat(content.knowledge()).hasSize(2);
-        assertThat(content.steps()).hasSize(3);
+        assertThat(content.steps()).isSameAs(STEPS);
         assertThat(content.pitfalls()).hasSize(1);
         assertThat(content.generalMethod()).hasSize(3);
         assertThat(content.scenes()).hasSize(17);
@@ -191,11 +203,12 @@ class GenShardPipelineTest {
     // ---- 2. 驳回路由映射表（纯函数） ----
 
     @Test
-    @DisplayName("路由映射表：素材段→P2；场景 id→对应场景片；scenes[i]→按下标归属；V2→P1")
+    @DisplayName("路由映射表：steps 令牌→P2a；knowledge/pitfalls/generalMethod 令牌→P2b；场景 id→对应场景片；scenes[i]→按下标归属；V2→P1")
     void routeTable_mappedShards() {
-        assertThat(route("V1/条数: knowledge 条数 5 超出范围 2-4").summary()).isEqualTo("P2");
-        assertThat(route("V1/散文LaTeX: steps[2].statement 含 LaTeX 标记").summary()).isEqualTo("P2");
-        assertThat(route("V3: steps[1].usesAnchor='L9' 不存在于 problem.lines").summary()).isEqualTo("P2");
+        assertThat(route("V1/条数: knowledge 条数 5 超出范围 2-4").summary()).isEqualTo("P2b");
+        assertThat(route("V1/散文LaTeX: steps[2].statement 含 LaTeX 标记").summary()).isEqualTo("P2a");
+        assertThat(route("V3: steps[1].usesAnchor='L9' 不存在于 problem.lines").summary()).isEqualTo("P2a");
+        assertThat(route("V1/散文LaTeX: knowledge[0].claim 含 LaTeX 标记").summary()).isEqualTo("P2b");
         assertThat(route("V1/ttsText: s04 ttsText 为空").summary()).isEqualTo("P3:act3-a");
         assertThat(route("FAIL s03 帧 12 卡片文字出缘").summary()).isEqualTo("P3:act3-a");
         assertThat(route("V1/散文LaTeX: scenes[1].ttsText 含 LaTeX 标记").summary()).isEqualTo("P3:act2");
@@ -231,13 +244,14 @@ class GenShardPipelineTest {
     }
 
     @Test
-    @DisplayName("路由映射表：结论卡错误 = 场景片 + P2（结论内容是 steps 末条 derivation，P2 字段）")
-    void routeTable_conclusionCard_p2PlusSceneShard() {
+    @DisplayName("路由映射表：结论卡错误 = 场景片 + P2a（结论内容 = steps 末条 derivation，P2a 字段）")
+    void routeTable_conclusionCard_p2aPlusSceneShard() {
         GenShardPipeline.RoutePlan plan = pipeline.routeErrors(List.of("FAIL s04 帧 40 结论卡公式等号后折行"), SMALL);
         assertThat(plan.redoAll()).isFalse();
-        assertThat(plan.summary()).isEqualTo("P3:act3-a+P2");
+        assertThat(plan.summary()).isEqualTo("P3:act3-a+P2a");
         assertThat(plan.errorsFor("P3:act3-a")).containsExactly("FAIL s04 帧 40 结论卡公式等号后折行");
-        assertThat(plan.errorsFor("P2")).containsExactly("FAIL s04 帧 40 结论卡公式等号后折行");
+        assertThat(plan.errorsFor(GenShardPipeline.P2A)).containsExactly("FAIL s04 帧 40 结论卡公式等号后折行");
+        assertThat(plan.errorsFor(GenShardPipeline.P2B)).isEmpty();
         assertThat(plan.errorsFor(GenShardPipeline.P1)).isEmpty();
     }
 
@@ -247,28 +261,28 @@ class GenShardPipelineTest {
         GenShardPipeline.RoutePlan plan = pipeline.routeErrors(List.of(
                 "V3: steps[0].usesAnchor='L9' 不存在于 problem.lines",
                 "V2: L2 段 1 不一致"), SMALL);
-        assertThat(plan.summary()).isEqualTo("P2+P1");
-        assertThat(plan.errorsFor(GenShardPipeline.P2)).containsExactly("V3: steps[0].usesAnchor='L9' 不存在于 problem.lines");
+        assertThat(plan.summary()).isEqualTo("P2a+P1");
+        assertThat(plan.errorsFor(GenShardPipeline.P2A)).containsExactly("V3: steps[0].usesAnchor='L9' 不存在于 problem.lines");
         assertThat(plan.errorsFor(GenShardPipeline.P1)).containsExactly("V2: L2 段 1 不一致");
         assertThat(plan.errorsFor(GenShardPipeline.P0)).isEmpty();
     }
 
     @Test
-    @DisplayName("路由映射表（T20a 预算规则）：题干宽→P1；列表高/字数超限→P2（报错措辞自带路由令牌）")
-    void routeTable_v1BudgetMessages_routeP1P2() {
+    @DisplayName("路由映射表（T20a 预算规则）：题干宽→P1；列表高/字数超限→P2b（报错措辞自带路由令牌）")
+    void routeTable_v1BudgetMessages_routeP1AndMaterialShards() {
         assertThat(route("V1/题干宽: problem.lines[2] 估宽 2246px 超出题干面板预算（缩放 0.566 低于下限 0.6，渲染必溢出）")
                 .summary()).isEqualTo("P1");
         assertThat(route("V1/列表高: generalMethod[2]（通法列表 itemRef=3）估算高度 1494.0px 超出可用高度 705.6px（缩放 0.472 低于下限 0.55，渲染必溢出）")
-                .summary()).isEqualTo("P2");
+                .summary()).isEqualTo("P2b");
         assertThat(route("V1/字数超限: pitfalls[0].claim 长度 21 码点超出上限 20")
-                .summary()).isEqualTo("P2");
+                .summary()).isEqualTo("P2b");
         // T23：题干宽消息末尾追加修复指引后仍路由 P1（尾缀不含场景 id/素材段令牌，不引诱误路由）
         assertThat(route("V1/题干宽: problem.lines[2] 估宽 2246px 超出题干面板预算（缩放 0.566 低于下限 0.6，渲染必溢出）；修复指引：把该行拆分为多行（选项各占一行）")
                 .summary()).isEqualTo("P1");
-        // T29 R-宽度③：derivation 公式宽消息自带 steps[i] 令牌 → P2（拆步归素材片）；
+        // T29 R-宽度③：derivation 公式宽消息自带 steps[i] 令牌 → P2a（拆步归素材核心片）；
         // popup formula 宽消息自带场景 id → 对应场景片（formula 可取关键主式缩短，场景片可修）
         assertThat(route("V1/公式宽: steps[0].derivation 第 1 步公式 61 码点超出 60 上限（步骤卡公式盒装不下，KaTeX 将折行）；请拆成多步/多条公式")
-                .summary()).isEqualTo("P2");
+                .summary()).isEqualTo("P2a");
         assertThat(route("V1/公式宽: scenes[3] s04 derivation-popup formula 32 码点超出 31 上限（推演卡装不下，KaTeX 将折行）；请缩短为该步推导的关键主式")
                 .summary()).isEqualTo("P3:act3-a");
     }
@@ -276,7 +290,7 @@ class GenShardPipelineTest {
     // ---- 2b. QA 排版类驳回路由（T24a，事故 001db856） ----
 
     @Test
-    @DisplayName("T24a QA 排版类驳回（事故 001db856）：FAIL 行含排版词 → 场景片级重做（P3 全部分片；P0/P1/P2 不重做）")
+    @DisplayName("T24a QA 排版类驳回（事故 001db856）：FAIL 行含排版词 → 场景片级重做（P3 全部分片；P0/P1/P2a/P2b 不重做）")
     void qaLayoutReject_routesSceneShardsOnly_p0p1p2Untouched() {
         // 事故原文形状：report.md 的 FAIL 行是自由散文（无场景 id——帧名 s-s10 只在
         // 「## s-s10-step-card.png」标题行，QaFrameCheck 不收集标题 → 路由只能拿到散文），
@@ -287,7 +301,8 @@ class GenShardPipelineTest {
         assertThat(plan.summary()).isEqualTo("P3:act2+P3:act3-a+P3:act4");
         assertThat(plan.errorsFor(GenShardPipeline.P0)).isEmpty();
         assertThat(plan.errorsFor(GenShardPipeline.P1)).isEmpty();
-        assertThat(plan.errorsFor(GenShardPipeline.P2)).isEmpty();
+        assertThat(plan.errorsFor(GenShardPipeline.P2A)).isEmpty();
+        assertThat(plan.errorsFor(GenShardPipeline.P2B)).isEmpty();
         assertThat(plan.errorsFor("P3:act2")).containsExactly(incident);
 
         // 词表逐词：只含单个排版词的自由散文 FAIL 行同样路由场景片（GOLDEN_LIKE 四片含 act3-b）
@@ -337,11 +352,11 @@ class GenShardPipelineTest {
         assertThat(plan.summary()).isEqualTo("全部");
     }
 
-    // ---- 3. 轮内只补错片（缓存复用） ----
+    // ---- 3. 轮内只补错片（缓存复用）与级联失效 ----
 
     @Test
-    @DisplayName("轮内只补错片：steps 错误 → P2 重做；P0/P1 缓存不重调；场景片随素材失效重做（下游消费一致性）")
-    void routedP2Error_materialAndScenesRedone_othersCached() {
+    @DisplayName("轮内只补错片：steps 错误 → P2a 重做 ⇒ P2b 随重做 ⇒ 场景片随重做；P0/P1 缓存不重调")
+    void routedCoreError_p2bAndScenesCascade_p0p1Cached() {
         pipeline.generate(EXTRACT, List.of(), state);   // 首轮全跑
 
         ContentJson second = pipeline.generate(EXTRACT,
@@ -350,12 +365,28 @@ class GenShardPipelineTest {
         assertThat(second.meta().problemType()).isEqualTo("计算题");
         verify(coordinator, times(1)).generate(any(), anyList());      // 骨架缓存复用
         verify(problemSlice, times(1)).format(any(), anyList());       // 题干片缓存复用
-        verify(materialShard, times(2)).generate(any(), any(), anyList());   // P2 重做
+        verify(materialShard, times(2)).generateCore(any(), any(), anyList());   // P2a 重做
+        verify(materialShard, times(2)).generateRest(any(), any(), anyList(), anyList());   // P2b 级联重做
         verify(sceneShard, times(6)).generate(any(), any(), anyList(), anyList(), anyList());  // 3 片 × 2 轮
     }
 
     @Test
-    @DisplayName("轮内只补错片：单场景片错误 → 只重做该片，P0/P1/P2 与其余场景片全部缓存")
+    @DisplayName("轮内只补错片：pitfalls 错误 → P2b 重做 ⇒ 场景片随重做，但 P2a 缓存保留")
+    void routedRestError_scenesCascade_p2aCached() {
+        pipeline.generate(EXTRACT, List.of(), state);
+
+        pipeline.generate(EXTRACT,
+                List.of("V1/字数超限: pitfalls[0].claim 长度 21 码点超出上限 20"), state);
+
+        verify(coordinator, times(1)).generate(any(), anyList());
+        verify(problemSlice, times(1)).format(any(), anyList());
+        verify(materialShard, times(1)).generateCore(any(), any(), anyList());   // P2a 缓存保留
+        verify(materialShard, times(2)).generateRest(any(), any(), anyList(), anyList());   // P2b 重做
+        verify(sceneShard, times(6)).generate(any(), any(), anyList(), anyList(), anyList());  // 场景片随重做
+    }
+
+    @Test
+    @DisplayName("轮内只补错片：单场景片错误 → 只重做该片，P0/P1/P2a/P2b 与其余场景片全部缓存")
     void routedSceneError_onlyThatSceneShardRedone() {
         pipeline.generate(EXTRACT, List.of(), state);
 
@@ -363,7 +394,8 @@ class GenShardPipelineTest {
 
         verify(coordinator, times(1)).generate(any(), anyList());
         verify(problemSlice, times(1)).format(any(), anyList());
-        verify(materialShard, times(1)).generate(any(), any(), anyList());
+        verify(materialShard, times(1)).generateCore(any(), any(), anyList());
+        verify(materialShard, times(1)).generateRest(any(), any(), anyList(), anyList());
         // act2/act4 各 1 次，act3-a 重做 2 次
         verify(sceneShard, times(4)).generate(any(), any(), anyList(), anyList(), anyList());
     }
@@ -377,34 +409,57 @@ class GenShardPipelineTest {
 
         verify(coordinator, times(2)).generate(any(), anyList());
         verify(problemSlice, times(2)).format(any(), anyList());
-        verify(materialShard, times(2)).generate(any(), any(), anyList());
+        verify(materialShard, times(2)).generateCore(any(), any(), anyList());
+        verify(materialShard, times(2)).generateRest(any(), any(), anyList(), anyList());
         verify(sceneShard, times(6)).generate(any(), any(), anyList(), anyList(), anyList());
     }
 
     // ---- 4. 分片失败 → ShardGenException（既有 retryOrFail 通道的输入形状） ----
 
     @Test
-    @DisplayName("分片 GlmException：包装分片名 + 结构化 problems（落库 source=P2 的依据），成功片已入缓存")
+    @DisplayName("P2a 分片 GlmException：包装分片名 P2a + 结构化 problems（落库 source=P2a 的依据），P1 已入缓存")
     void shardGlmFailure_wrapsShardNameAndProblems_cachesSuccesses() {
         List<String> problems = List.of("素材 steps 条数 2 与骨架计划 3 不一致（条数以骨架为准）");
-        when(materialShard.generate(any(), any(), anyList()))
+        when(materialShard.generateCore(any(), any(), anyList()))
                 .thenThrow(new GlmException(problems, true))
-                .thenReturn(MATERIAL);
+                .thenReturn(STEPS);
 
         assertThatThrownBy(() -> pipeline.generate(EXTRACT, List.of(), state))
                 .isInstanceOf(ShardGenException.class)
-                .hasMessageContaining("P2 分片失败")
+                .hasMessageContaining("P2a 分片失败")
                 .extracting("shard", "problems", "retryable")
-                .containsExactly("P2", problems, true);
+                .containsExactly("P2a", problems, true);
         // 失败轮里成功片已缓存：P1 不必重跑
         verify(problemSlice, times(1)).format(any(), anyList());
 
-        // 补跑轮：P1 用缓存，P2 补跑成功，场景片首次产出 → 合并完整
+        // 补跑轮：P1 用缓存，P2a 补跑成功 → P2b 串行 → 场景片首次产出 → 合并完整
         ContentJson content = pipeline.generate(EXTRACT, List.of(), state);
         verify(problemSlice, times(1)).format(any(), anyList());       // 仍 1 次（缓存）
-        verify(materialShard, times(2)).generate(any(), any(), anyList());
+        verify(materialShard, times(2)).generateCore(any(), any(), anyList());
+        verify(materialShard, times(1)).generateRest(any(), any(), anyList(), anyList());   // 首轮未跑
         verify(sceneShard, times(3)).generate(any(), any(), anyList(), anyList(), anyList());   // 首轮未跑
         assertThat(content.scenes()).hasSize(6);
+    }
+
+    @Test
+    @DisplayName("P2b 分片 GlmException：包装分片名 P2b，P2a 缓存保留（补跑轮不重调核心片）")
+    void restShardGlmFailure_p2aCacheKept() {
+        List<String> problems = List.of("素材 knowledge 条数 3 与骨架计划 2 不一致（条数以骨架为准）");
+        when(materialShard.generateRest(any(), any(), anyList(), anyList()))
+                .thenThrow(new GlmException(problems, true))
+                .thenReturn(REST);
+
+        assertThatThrownBy(() -> pipeline.generate(EXTRACT, List.of(), state))
+                .isInstanceOf(ShardGenException.class)
+                .hasMessageContaining("P2b 分片失败")
+                .extracting("shard", "problems", "retryable")
+                .containsExactly("P2b", problems, true);
+        verify(materialShard, times(1)).generateCore(any(), any(), anyList());   // P2a 已缓存
+
+        pipeline.generate(EXTRACT, List.of(), state);
+        verify(materialShard, times(1)).generateCore(any(), any(), anyList());   // 补跑轮 P2a 仍缓存
+        verify(materialShard, times(2)).generateRest(any(), any(), anyList(), anyList());
+        verify(sceneShard, times(3)).generate(any(), any(), anyList(), anyList(), anyList());   // 首轮未跑
     }
 
     @Test
@@ -434,7 +489,8 @@ class GenShardPipelineTest {
         assertThat(pipeline.describeRoute(List.of("V2: x"), state)).isEqualTo("首轮全跑");
 
         pipeline.generate(EXTRACT, List.of(), state);
-        assertThat(pipeline.describeRoute(List.of("V3: steps[0].usesAnchor='L9'"), state)).isEqualTo("P2");
+        assertThat(pipeline.describeRoute(List.of("V3: steps[0].usesAnchor='L9'"), state)).isEqualTo("P2a");
+        assertThat(pipeline.describeRoute(List.of("V1/字数超限: pitfalls[0].claim 超限"), state)).isEqualTo("P2b");
         assertThat(pipeline.describeRoute(List.of("解析不出"), state)).isEqualTo("全部");
     }
 

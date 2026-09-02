@@ -17,13 +17,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 分片 prompt 漂移守护（T6 评审 M 项起源，T18 分片生成重构<b>有意更新</b>，T20b 再重录：
  * COORDINATOR 末尾追加题型骨架段，T23 三重重录：EXTRACT 追加选项成行/长句拆行规则与
  * 选择题 few-shot、PROBLEM_SLICE 末尾追加行宽预算段（R1 修复轮：行数条款改为「以输入为
- * 准、不得自行增删行」，与保真红线/工位校验对齐），T29 事故驱动重录：MATERIAL 追加步骤卡
+ * 准、不得自行增删行」，与保真红线/工位校验对齐），T29 事故驱动重录：素材片追加步骤卡
  * 公式宽度规则、SCENE popup formula 加上限 31 改写条款（golden few-shot 示例段字节零动），
- * 其余常量 golden few-shot 示例段零变化断言保留）：
+ * T30 事故驱动拆分重录：MATERIAL 一拆二（MATERIAL_CORE=steps 核心 / MATERIAL_REST=周边三段），
+ * golden few-shot 按段确定性切片注入（切片=template 素材段 json.dumps(ensure_ascii=False, indent=2)
+ * 逐字派生，金标本体字节零动，一致性由本测试逐条目守护），其余常量 golden few-shot 示例段
+ * 零变化断言保留）：
  * golden（封版模板 template/src/data/content.json，只读单源）few-shot 必须在分片 prompt
- * 中逐字注入——题干片吃 golden problem 段、素材片吃 golden 四段素材、场景片吃 golden
- * scenes 切片（s10..s14）、协调者吃 golden 派生骨架（条数/锚点/全部场景 id）。
- * 另守卡片文字硬约束段（自 SCRIPT prompt 迁入 MATERIAL——约束的字段全属 P2 产出）。
+ * 中逐字注入——题干片吃 golden problem 段、素材核心片吃 golden steps 段、素材周边片吃
+ * golden knowledge/pitfalls/generalMethod 段、场景片吃 golden scenes 切片（s10..s14）、
+ * 协调者吃 golden 派生骨架（条数/锚点/全部场景 id）。
+ * 另守卡片文字硬约束段（结论卡/步骤卡公式宽度归 CORE；generalMethod/pitfalls 字数归 REST）。
  */
 class PromptsDriftGuardTest {
 
@@ -128,7 +132,7 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("T28 科目中性化：五个分片 prompt 角色词与 V4 阅卷词去「考研数学」限定（开场白/审题员/阅卷专家）")
+    @DisplayName("T28 科目中性化：五个分片 prompt 角色词与 V4 阅卷词去「考研数学」限定（开场白/审题员/阅卷专家；T30 后素材片两常量同查）")
     void stationPromptsAreSubjectNeutral() {
         assertThat(Prompts.EXTRACT)
                 .as("EXTRACT 开场白：考研审题员 + 科目覆盖面明示")
@@ -141,8 +145,12 @@ class PromptsDriftGuardTest {
                 .as("题干片开场白中性化")
                 .contains("你是考研讲题视频的题干排版员")
                 .doesNotContain("考研数学");
-        assertThat(Prompts.MATERIAL)
-                .as("素材片开场白中性化")
+        assertThat(Prompts.MATERIAL_CORE)
+                .as("素材核心片开场白中性化")
+                .contains("你是考研讲题视频的内容素材编辑")
+                .doesNotContain("考研数学");
+        assertThat(Prompts.MATERIAL_REST)
+                .as("素材周边片开场白中性化")
                 .contains("你是考研讲题视频的内容素材编辑")
                 .doesNotContain("考研数学");
         assertThat(Prompts.SCENE)
@@ -219,14 +227,62 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("MATERIAL 与 golden 同步：知识点/推导 golden 文本逐字注入（四段素材 few-shot 保持）")
-    void materialPromptStaysInSyncWithGolden() throws Exception {
+    @DisplayName("MATERIAL_CORE 与 golden steps 段同步（T30 切片注入）：每步 derivation/statement/usesAnchor 逐字注入，且不含周边三段内容")
+    void corePromptStaysInSyncWithGoldenSteps() throws Exception {
         JsonNode golden = MAPPER.readTree(goldenFile.toFile());
-        assertThat(Prompts.MATERIAL)
-                .contains(golden.path("knowledge").path(0).path("claim").asText())
-                .as("few-shot 内嵌的是 JSON 转义形态（\\ → \\\\），逐字等价")
-                .contains(jsonEscaped(golden.path("steps").path(0).path("derivation").asText()))
-                .contains(jsonEscaped(golden.path("steps").path(golden.path("steps").size() - 1).path("derivation").asText()));
+        JsonNode steps = golden.path("steps");
+        assertThat(steps.size()).as("golden steps 非空").isGreaterThan(0);
+        for (JsonNode step : steps) {
+            assertThat(Prompts.MATERIAL_CORE)
+                    .as("核心片 few-shot 应含 golden 步骤 usesAnchor %s", step.path("usesAnchor").asText())
+                    .contains(step.path("usesAnchor").asText())
+                    .as("核心片 few-shot 应含 golden 步骤 statement「%s」", step.path("statement").asText())
+                    .contains(step.path("statement").asText())
+                    .as("核心片 few-shot 应含 golden 步骤 derivation（JSON 转义形态）")
+                    .contains(jsonEscaped(step.path("derivation").asText()))
+                    .as("核心片 few-shot 应含 golden 步骤 note「%s」", step.path("note").asText())
+                    .contains(step.path("note").asText());
+        }
+        // 切片纯度：steps-only，周边三段不进核心片 few-shot
+        assertThat(Prompts.MATERIAL_CORE)
+                .as("核心片切片不含 golden knowledge/pitfalls/generalMethod 正文")
+                .doesNotContain(golden.path("knowledge").path(0).path("claim").asText())
+                .doesNotContain(golden.path("pitfalls").path(0).path("claim").asText())
+                .doesNotContain(golden.path("generalMethod").path(0).path("step").asText());
+    }
+
+    @Test
+    @DisplayName("MATERIAL_REST 与 golden 周边三段同步（T30 切片注入）：knowledge/pitfalls/generalMethod 逐条逐字注入，且不含 steps 内容")
+    void restPromptStaysInSyncWithGoldenRest() throws Exception {
+        JsonNode golden = MAPPER.readTree(goldenFile.toFile());
+        for (JsonNode k : golden.path("knowledge")) {
+            assertThat(Prompts.MATERIAL_REST)
+                    .as("周边片 few-shot 应含 golden knowledge claim「%s」", k.path("claim").asText())
+                    .contains(k.path("claim").asText())
+                    .as("周边片 few-shot 应含 golden knowledge formula（JSON 转义形态）")
+                    .contains(jsonEscaped(k.path("formula").asText()))
+                    .contains(k.path("premise").asText())
+                    .contains(k.path("trap").asText());
+        }
+        for (JsonNode p : golden.path("pitfalls")) {
+            assertThat(Prompts.MATERIAL_REST)
+                    .contains(p.path("claim").asText())
+                    .contains(p.path("why").asText());
+        }
+        for (JsonNode m : golden.path("generalMethod")) {
+            assertThat(Prompts.MATERIAL_REST)
+                    .contains(m.path("step").asText())
+                    .contains(m.path("trick").asText());
+        }
+        // 切片纯度：三段-only，steps 正文不进周边片 few-shot
+        assertThat(Prompts.MATERIAL_REST)
+                .as("周边片切片不含 golden steps 正文（statement/derivation/note）")
+                .doesNotContain(golden.path("steps").path(0).path("statement").asText())
+                .doesNotContain(jsonEscaped(golden.path("steps").path(0).path("derivation").asText()))
+                .doesNotContain(golden.path("steps").path(0).path("note").asText())
+                .as("周边片不得出现锚点/推导字段名（steps 结构归核心片）")
+                .doesNotContain("usesAnchor")
+                .doesNotContain("derivation");
     }
 
     /** golden 值 → prompt few-shot 内嵌形态（JSON 字符串转义：反斜杠翻倍）。 */
@@ -235,9 +291,9 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("Ruling-17：MATERIAL 含结论卡/卡片文字硬约束（可执行、可数：单行短式/字数上限/禁止长分式；T18 自 SCRIPT 迁入）")
-    void materialPromptCarriesCardTextHardConstraints() {
-        assertThat(Prompts.MATERIAL)
+    @DisplayName("Ruling-17（T30 拆分重录）：结论卡硬约束归 MATERIAL_CORE；generalMethod/pitfalls 字数硬约束归 MATERIAL_REST")
+    void materialPromptsCarryCardTextHardConstraints() {
+        assertThat(Prompts.MATERIAL_CORE)
                 .as("结论卡硬约束段存在")
                 .contains("卡片文字硬约束")
                 .contains("结论卡")
@@ -252,21 +308,32 @@ class PromptsDriftGuardTest {
                 .contains("\\begin{aligned}")
                 .contains("长分式")
                 .contains("\\frac")
-                .as("标签字数上限")
-                .contains("≤6 字标签")
                 .as("R2 实证反例（等号后折行）")
                 .contains("等号后折行");
+        assertThat(Prompts.MATERIAL_REST)
+                .as("周边片卡片文字硬约束段存在")
+                .contains("卡片文字硬约束")
+                .as("标签字数上限")
+                .contains("≤6 字标签")
+                .contains("step 整行 ≤ 24 字")
+                .contains("trick ≤ 40 字")
+                .contains("claim ≤ 20 字")
+                .contains("why ≤ 40 字");
     }
 
     @Test
-    @DisplayName("T18：三条新生成规则进分片 prompt（并列条件拆分/推导逐步自验/口播与画面公式逐符号一致；T28 「并列数学条件」中性化为「并列条件」）")
+    @DisplayName("T18 三条新生成规则（T30 拆分重录）：并列条件拆分/推导逐步自验/超细无跳跃归 MATERIAL_CORE；REST 保留并列条件拆分；SCENE 口播逐符号一致照旧")
     void shardPromptsCarryThreeNewGenerationRules() {
         assertThat(Prompts.COORDINATOR)
                 .contains("并列条件必须拆成多步/多条")
                 .contains("逐步自验");
-        assertThat(Prompts.MATERIAL)
+        assertThat(Prompts.MATERIAL_CORE)
                 .contains("并列条件必须拆成多行/多段")
-                .contains("推导逐步自验");
+                .contains("推导逐步自验")
+                .contains("超细无跳跃");
+        assertThat(Prompts.MATERIAL_REST)
+                .contains("并列条件必须拆成多条")
+                .contains("必须与载荷里的 steps 成品一致");
         assertThat(Prompts.SCENE)
                 .contains("并列条件必须拆成多场/多 popup")
                 .contains("推导逐步自验")
@@ -274,16 +341,16 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("T29 事故 daf87d4c 重录：MATERIAL 步骤卡 derivation 单行短公式 ≤30 字符（超长拆步）；SCENE popup formula ≤31 字符（默认照抄 derivation，照抄超长改写关键主式）；追加只在指令段，golden few-shot 示例段字节零动")
+    @DisplayName("T29 事故 daf87d4c 重录（T30 迁移）：步骤卡 derivation 单行短公式 ≤30 字符归 MATERIAL_CORE；SCENE popup formula ≤31 字符照旧；追加只在指令段，golden few-shot 示例段字节零动")
     void shardPromptsCarryFormulaWidthRules() {
-        // MATERIAL：与 V1Budget R-宽度③（steps 上限 60=golden 最长链）同病灶的上游收紧口径
-        assertThat(Prompts.MATERIAL)
+        // MATERIAL_CORE：与 V1Budget R-宽度③（steps 上限 60=golden 最长链）同病灶的上游收紧口径
+        assertThat(Prompts.MATERIAL_CORE)
                 .as("步骤卡公式宽度规则逐字（30 字符为收紧目标，反例=事故不等式链形状）")
                 .contains("- 每步 derivation 是单行短公式：TeX 源码不超过 30 个字符（如 -\\frac{1}{4} \\le t \\le 0 已是上限长度）；"
                         + "更长的推导必须拆成多个步骤/多条公式，禁止单条塞入整条不等式链或长表达式");
-        assertThat(Prompts.MATERIAL.indexOf("每步 derivation 是单行短公式"))
+        assertThat(Prompts.MATERIAL_CORE.indexOf("每步 derivation 是单行短公式"))
                 .as("追加在卡片文字硬约束指令段内、golden few-shot 示例段之前")
-                .isLessThan(Prompts.MATERIAL.indexOf("示例（golden 素材"));
+                .isLessThan(Prompts.MATERIAL_CORE.indexOf("示例（golden"));
         // SCENE：31 与 V1Budget.POPUP_FORMULA_MAX_CODE_POINTS 同数值（改写条款化解与照抄规则的冲突）
         assertThat(Prompts.SCENE)
                 .as("popup formula 上限逐字")
@@ -298,7 +365,29 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("golden 合规回归：结论卡/generalMethod/pitfalls 文字满足 MATERIAL 硬约束数值")
+    @DisplayName("T30 拆分纯度：MATERIAL_CORE 只含 steps scope（不得出现周边三段字段名/条目规则）；MATERIAL_REST 只含三段 scope（不得出现 steps 字段 spec/骨架条数计划）")
+    void splitPromptsAreScopePure() {
+        assertThat(Prompts.MATERIAL_CORE)
+                .as("核心片不出现周边三段字段名")
+                .doesNotContain("knowledge")
+                .doesNotContain("pitfalls")
+                .doesNotContain("generalMethod")
+                .contains("steps")
+                .as("输出形状只有 steps 一段")
+                .contains("只输出 {\"steps\":[...]}");
+        assertThat(Prompts.MATERIAL_REST)
+                .as("周边片不出现 steps 字段 spec（输出形状/字段约定均无 usesAnchor/statement/derivation/note）")
+                .doesNotContain("\"statement\"")
+                .doesNotContain("\"note\"")
+                .doesNotContain("statement：")
+                .doesNotContain("note：")
+                .contains("knowledge")
+                .contains("pitfalls")
+                .contains("generalMethod");
+    }
+
+    @Test
+    @DisplayName("golden 合规回归：结论卡/generalMethod/pitfalls 文字满足素材片硬约束数值")
     void goldenContentSatisfiesCardTextHardConstraints() throws Exception {
         JsonNode golden = MAPPER.readTree(goldenFile.toFile());
 

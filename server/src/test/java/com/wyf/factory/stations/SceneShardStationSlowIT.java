@@ -46,9 +46,10 @@ class SceneShardStationSlowIT {
     void generate_realCall_matchesPlanAndCopiesFormula() throws Exception {
         ExtractResult extract = extractFixture();
         AppProperties props = props();
-        Material material = new MaterialShardStation(
-                new GlmClient(new JdkHttpTransport(props), new Secrets(), props))
-                .generate(extract, MaterialShardStationSlowITSupport.materialSkeleton());
+        // T30：P2a 核心片 + P2b 周边片真调 → Java 侧装配完整素材（与生产 GenShardPipeline 同装配）
+        Material material = MaterialShardStationSlowITSupport.generateReal(
+                new MaterialShardStation(new GlmClient(new JdkHttpTransport(props), new Secrets(), props)),
+                extract);
 
         List<Skeleton.ScenePlan> plan = List.of(
                 new Skeleton.ScenePlan("s05", 3, "step-card", 1),
@@ -75,9 +76,10 @@ class SceneShardStationSlowIT {
     void captureFixture() throws Exception {
         ExtractResult extract = extractFixture();
         AppProperties props = props();
-        Material material = new MaterialShardStation(
-                new GlmClient(new JdkHttpTransport(props), new Secrets(), props))
-                .generate(extract, MaterialShardStationSlowITSupport.materialSkeleton());
+        // T30：P2a 核心片 + P2b 周边片真调 → Java 侧装配完整素材（与生产 GenShardPipeline 同装配）
+        Material material = MaterialShardStationSlowITSupport.generateReal(
+                new MaterialShardStation(new GlmClient(new JdkHttpTransport(props), new Secrets(), props)),
+                extract);
         List<Skeleton.ScenePlan> plan = List.of(
                 new Skeleton.ScenePlan("s05", 3, "step-card", 1),
                 new Skeleton.ScenePlan("s06", 3, "derivation-popup", 1),
@@ -135,5 +137,13 @@ final class MaterialShardStationSlowITSupport {
 
     static List<Skeleton.GlossaryTerm> glossary() {
         return List.of(new Skeleton.GlossaryTerm("判别式", "判别式（记号 Δ）"));
+    }
+
+    /** T30 拆分后 P2a+P2b 真调链 → 装配完整 Material（两小请求，坑点/通法看着真 steps 写）。 */
+    static Material generateReal(MaterialShardStation station, ExtractResult extract) {
+        Skeleton skeleton = materialSkeleton();
+        java.util.List<Material.Step> steps = station.generateCore(extract, skeleton);
+        MaterialShardStation.Rest rest = station.generateRest(extract, skeleton, steps);
+        return new Material(rest.knowledge(), steps, rest.pitfalls(), rest.generalMethod());
     }
 }

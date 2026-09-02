@@ -1,0 +1,40 @@
+{
+  "steps": [
+    {
+      "usesAnchor": "L1",
+      "statement": "对 f(x)=x^{3}+ax^{2}+x 求导，幂函数导数公式 (x^{n})'=nx^{n-1} 逐项求导",
+      "derivation": "f'(x)=3x^{2}+2ax+1",
+      "note": "三次函数的导数是关于 x 的二次函数，a 只出现在一次项系数中"
+    },
+    {
+      "usesAnchor": "L2",
+      "statement": "把「f(x) 在 R 上单调递增」翻译为导数恒非负",
+      "derivation": "f'(x)=3x^{2}+2ax+1\\ge 0\\ \\text{在}\\ \\mathbb{R}\\ \\text{上恒成立}",
+      "note": "这是全题最关键的转化：单调性条件转化为不等式恒成立问题"
+    },
+    {
+      "usesAnchor": "L2",
+      "statement": "确认二次项系数并写出恒非负的充要条件",
+      "derivation": "3>0\\ \\text{且}\\ \\Delta=(2a)^{2}-4\\times 3\\times 1\\le 0",
+      "note": "开口向上由系数 3 保证，与 a 无关，故判别式 \\Delta\\le 0 即可保证恒非负"
+    },
+    {
+      "usesAnchor": "L3",
+      "statement": "化简判别式不等式",
+      "derivation": "4a^{2}-12\\le 0\\iff a^{2}\\le 3",
+      "note": "两边同除以 4，移项整理"
+    },
+    {
+      "usesAnchor": "L3",
+      "statement": "解 a^{2}\\le 3，开方得双支闭区间",
+      "derivation": "-\\sqrt{3}\\le a\\le \\sqrt{3}",
+      "note": "开方必须同时考虑正负两支；a^{2}\\le 3 允许取等，端点是闭的"
+    },
+    {
+      "usesAnchor": "L3",
+      "statement": "写出最终结论并口算回验",
+      "derivation": "a\\in[-\\sqrt{3},\\ \\sqrt{3}]",
+      "note": "回验：a=±\\sqrt{3} 时 f'(x)\\ge 0 且仅在一点处导数为零，不改变单调递增，端点可取"
+    }
+  ]
+}

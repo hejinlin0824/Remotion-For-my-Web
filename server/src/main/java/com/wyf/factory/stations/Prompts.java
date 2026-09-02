@@ -6,8 +6,8 @@ package com.wyf.factory.stations;
  *
  * <p>few-shot 示例内嵌在 system prompt 末尾（GlmClient 只有 system+user 两条消息形态）；
  * few-shot 取封版模板 template/src/data/content.json（golden，只读复制）——
- * MATERIAL 用其四段素材（problem 外部分）、SCENE 用其 scenes 切片、PROBLEM_SLICE 用其
- * problem 段、COORDINATOR 用其派生骨架（条数/锚点/场景清单与 golden 逐项一致）。
+ * MATERIAL_CORE/MATERIAL_REST（T30 自 MATERIAL 拆分）用其素材段确定性切片（steps 段/三段）、
+ * SCENE 用其 scenes 切片、PROBLEM_SLICE 用其 problem 段、COORDINATOR 用其派生骨架（条数/锚点/场景清单与 golden 逐项一致）。
  * golden few-shot 保持逐字注入（PromptsDriftGuardTest 守护，T18 有意更新）。</p>
  */
 public final class Prompts {
@@ -111,38 +111,37 @@ public final class Prompts {
             - 每行宽度预算：一行在 1920 宽画面题干面板内最大可容 1272px；估算口径=中文/全角字符按 26px、数学 LaTeX 源码码点按 16px 粗估。行数与行文顺序以输入为准（保真规则不变）；若发现输入某行超宽，照实排版，不得自行增删行——选项（A./B./C./D.）各自独立成行与长句拆行都是审题工位的职责。""";
 
     /**
-     * GEN-P2 素材片工位：题干 + 骨架计划 → 四段素材（原 MATERIAL 工位 prompt 演进：
-     * golden few-shot 逐字保持；条数/锚点改为骨架绑定；新增并列条件拆分与逐步自验规则；
-     * 卡片文字硬约束自 SCRIPT prompt 迁入——结论卡/generalMethod/pitfalls 字数全属本片产出字段；
-     * T29 事故 daf87d4c 追加步骤卡公式宽度约束：derivation 单行短公式 ≤ 30 字符，超长拆步）。
+     * GEN-P2a 素材·核心片工位：题干 + 骨架（steps 计划+anchors）+ 术语表 → steps 独占
+     * （T30 事故驱动：job 14b37e5b P2 全链最大单请求四连败于 GLM 长请求不稳窗口，用户裁定
+     * 「拆开成若干小请求然后拼成原来完整的请求」。自 MATERIAL 拆出，按「数学核心 vs 周边散文」
+     * 切：steps 步步依赖必须单请求生成，拆的是 steps vs 周边不是步与步）。
+     * 指令段保留与自身 scope 相关的既有规则：并列条件拆分/推导逐步自验/超细无跳跃、
+     * 散文字段禁 LaTeX（statement/note）、卡片文字硬约束（结论卡=steps 末条 derivation）、
+     * T29 公式宽度条款（derivation 单行短公式 ≤30 字符）——均逐字保留。
+     * golden few-shot = template/src/data/content.json 的 steps 段确定性切片（金标本体字节零动，
+     * PromptsDriftGuardTest 逐条目守护切片与金标一致）。
      */
-    public static final String MATERIAL = """
-            你是考研讲题视频的内容素材编辑。根据用户给的题目 JSON（{"problemType":...,"problem":{lines}，type="math" 的 value 是 LaTeX 源码）、骨架计划 plan（{"counts":{...},"anchors":[...]}，协调者已按全题统一规划）与术语表 glossary，产出讲题所需的四段素材。只输出 JSON 本身，不要 markdown 代码块，不要解释。
+    public static final String MATERIAL_CORE = """
+            你是考研讲题视频的内容素材编辑。根据用户给的题目 JSON（{"problemType":...,"problem":{lines}，type="math" 的 value 是 LaTeX 源码）、骨架计划 plan（{"counts":{"steps":S},"anchors":[...]}，协调者已按全题统一规划）与术语表 glossary，产出讲题所需的解题步骤 steps（素材核心段）。只输出 {"steps":[...]} 本身，不要 markdown 代码块，不要解释。
 
-            输出形状（四段缺一不可）：
-            {"knowledge":[...],"steps":[...],"pitfalls":[...],"generalMethod":[...]}
+            输出形状（steps 独占）：
+            {"steps":[{"usesAnchor":"...","statement":"...","derivation":"...","note":"..."},...]}
 
             骨架绑定（必须全部满足，不得自行改计划）：
-            - 条数以 plan.counts 为准逐段完全一致：knowledge=counts.knowledge / steps=counts.steps / pitfalls=counts.pitfalls / generalMethod=counts.generalMethod，不得增减
+            - 条数以 plan.counts 为准完全一致：steps=counts.steps，不得增减
             - steps[i].usesAnchor 必须逐位等于 plan.anchors[i]（锚点由协调者统一指派，只领用不改造）
             - 术语照 glossary 统一叫法，不得同物异名
 
             生成规则（必须全部满足）：
-            - 并列条件必须拆成多行/多段，禁止挤进单个公式段（一个 derivation/formula 只表达一个条件或一个动作，并列条件各占一条/一步）
+            - 并列条件必须拆成多行/多段，禁止挤进单个公式段（一个 derivation 只表达一个条件或一个动作，并列条件各占一步）
             - 推导逐步自验：每写一步，把前步结论代入核对再往下写；发现接不上就回到正确的中间结论，禁止跳步硬推
             - 超细无跳跃：每步只做一个小动作，相邻步骤之间不允许跳步，让人跟着读就能复现
 
             字段约定（散文字段禁 LaTeX，违反会被驳回重写）：
-            - 散文字段 = knowledge 的 claim/premise/trap、steps 的 statement/note、pitfalls 的 claim/why、generalMethod 的 step/trick：只写纯中文叙述，简易数学用 Unicode 符号（± √ ≤ ≥ ⇔ →），禁止任何 LaTeX 源码（\\frac、\\sqrt、\\ge 等反斜杠命令，以及 ^{…}、_{…} 上/下标写法）
-            - LaTeX 只允许写进 formula（knowledge）与 derivation（steps）两个字段
-            - 反例（禁止，模板会把 LaTeX 源码原样显示）："statement": "对 f(x)=x^{3}+ax^{2}+x 逐项求导"；"trap": "判别式 \\Delta\\le 0"
-            - 正例："statement": "对 f(x) 逐项求导，三次项降为二次"；"trap": "写成 f'(x)>0 会漏掉临界情形（本题 a=±√3）"
-
-            knowledge（知识点回顾，本题为哪几个考点服务）：每条 {"claim","formula","premise","trap"}
-            - claim：一句话知识点断言（中文）
-            - formula：配套公式，KaTeX 源码（不用 $ 定界符）
-            - premise：使用前提/适用条件
-            - trap：常见易错点（尽量与本题相关）
+            - 散文字段 = steps 的 statement/note：只写纯中文叙述，简易数学用 Unicode 符号（± √ ≤ ≥ ⇔ →），禁止任何 LaTeX 源码（\\frac、\\sqrt、\\ge 等反斜杠命令，以及 ^{…}、_{…} 上/下标写法）
+            - LaTeX 只允许写进 derivation（steps）字段
+            - 反例（禁止，模板会把 LaTeX 源码原样显示）："statement": "对 f(x)=x^{3}+ax^{2}+x 逐项求导"
+            - 正例："statement": "对 f(x) 逐项求导，三次项降为二次"
 
             steps（解题步骤）：每条 {"usesAnchor","statement","derivation","note"}
             - usesAnchor：本步依据的题干行 id，取 plan.anchors 对应项（如 "L1"）
@@ -150,43 +149,14 @@ public final class Prompts {
             - derivation：本步得到的推导式，KaTeX 源码（不用 $ 定界符）
             - note：本步的提示/依据（中文）
 
-            pitfalls（易错警示）：每条 {"claim","why"}
-            - claim：错误做法（一句话）
-            - why：为什么错、会丢什么
-
-            generalMethod（通用方法论，以后遇到同类题怎么做）：每条 {"step","trick"}
-            - step：第几步做什么（识别/转化/求解回验式的通用流程）
-            - trick：这一步的口诀/技巧
-
             卡片文字硬约束（防渲染溢出；实证多轮驳回同因，必须全部满足）：
             - 结论卡 = steps 最后一条的 derivation（画面以「结论」标签展示）：只允许一行短式最终结果，总长 ≤ 40 个字符，形状参考 a\\in[-\\sqrt{3},\\ \\sqrt{3}]；禁止多行推导、禁止换行、禁止 \\begin{aligned}、禁止长分式（\\frac 的分子或分母超过 4 个字符）
             - 每步 derivation 是单行短公式：TeX 源码不超过 30 个字符（如 -\\frac{1}{4} \\le t \\le 0 已是上限长度）；更长的推导必须拆成多个步骤/多条公式，禁止单条塞入整条不等式链或长表达式
-            - generalMethod 每条：step 以「≤6 字标签：说明」开头（如「识别：可导函数加区间单调」），step 整行 ≤ 24 字，trick ≤ 40 字，step 与 trick 内不放公式
-            - pitfalls 每条：claim ≤ 20 字，why ≤ 40 字
-            - 反例（实证驳回同因，禁止）：结论卡 derivation 写成长式，渲染时等号后折行（"z =" 与 "2" 拆成两行）；step/标签过长竖向拆行、卡片文字出缘
+            - 反例（实证驳回同因，禁止）：结论卡 derivation 写成长式，渲染时等号后折行（"z =" 与 "2" 拆成两行）
 
-            示例（golden 素材，题目：f(x)=x^{3}+ax^{2}+x 在 R 上单调递增求 a；plan：counts={knowledge:3,steps:5,pitfalls:2,generalMethod:3}，anchors=["L1","L2","L2","L3","L3"]）：
+            示例（golden 素材 steps 段，题目：f(x)=x^{3}+ax^{2}+x 在 R 上单调递增求 a；plan：counts.steps=5，anchors=["L1","L2","L2","L3","L3"]）：
+
             {
-              "knowledge": [
-                {
-                  "claim": "可导函数在区间上单调递增，等价于导数在该区间恒非负",
-                  "formula": "f(x)\\\\text{ 在 }I\\\\text{ 单调递增}\\\\iff f'(x)\\\\ge 0",
-                  "premise": "f(x) 在区间内可导；考纲默认单调递增允许导数个别零点",
-                  "trap": "写成 f'(x)>0 会漏掉临界情形（本题 a=±√3）"
-                },
-                {
-                  "claim": "二次不等式在全体实数上恒成立的判别法",
-                  "formula": "ax^{2}+bx+c\\\\ge 0\\\\iff a>0\\\\text{ 且 }\\\\Delta=b^{2}-4ac\\\\le 0",
-                  "premise": "二次项系数符号必须先确认",
-                  "trap": "忽略开口方向，只看判别式"
-                },
-                {
-                  "claim": "恒成立问题两条常用路径：判别式法、分离参数法",
-                  "formula": "\\\\Delta\\\\le 0\\\\quad\\\\text{或}\\\\quad a\\\\ge g(x)_{\\\\max}",
-                  "premise": "含二次结构优先判别式；参数能干净分离时用分离参数",
-                  "trap": "端点开闭要单独检验取等情形"
-                }
-              ],
               "steps": [
                 {
                   "usesAnchor": "L1",
@@ -218,6 +188,80 @@ public final class Prompts {
                   "derivation": "a\\\\in[-\\\\sqrt{3},\\\\ \\\\sqrt{3}]",
                   "note": "取得到等号，端点是闭的"
                 }
+              ]
+            }
+            }""";
+
+    /**
+     * GEN-P2b 素材·周边片工位：P2a 同款基础载荷 + P2a 的 steps 成品 JSON（上下文）→
+     * knowledge/pitfalls/generalMethod 三段（T30 自 MATERIAL 拆出；串行在 P2a 之后，
+     * 坑点/通法看着真 steps 写，防上游自造「叙事与解法失配」）。
+     * 指令段保留与自身 scope 相关的既有规则：散文字段禁 LaTeX（claim/premise/trap/why/step/trick）、
+     * 卡片文字硬约束（generalMethod/pitfalls 字数）、并列条件拆分（formula 单条件）。
+     * golden few-shot = template/src/data/content.json 的三段确定性切片（金标本体字节零动，
+     * PromptsDriftGuardTest 逐条目守护切片与金标一致）。
+     */
+    public static final String MATERIAL_REST = """
+            你是考研讲题视频的内容素材编辑。根据用户给的题目 JSON（{"problemType":...,"problem":{lines}，type="math" 的 value 是 LaTeX 源码）、骨架计划 plan（{"counts":{...},"anchors":[...]}，协调者已按全题统一规划）、术语表 glossary 与已定稿的解题步骤 steps（素材核心片产出，只作上下文，不得改动），产出讲题所需的三段周边素材。只输出 JSON 本身，不要 markdown 代码块，不要解释。
+
+            输出形状（三段缺一不可）：
+            {"knowledge":[...],"pitfalls":[...],"generalMethod":[...]}
+
+            骨架绑定（必须全部满足，不得自行改计划）：
+            - 条数以 plan.counts 为准逐段完全一致：knowledge=counts.knowledge / pitfalls=counts.pitfalls / generalMethod=counts.generalMethod，不得增减（counts.steps 与载荷里的 steps 成品仅供参照）
+            - 坑点与通法必须与载荷里的 steps 成品一致：pitfalls/generalMethod 讲的错法与方法要能在 steps 里找到对应动作，禁止自造 steps 里没有的叙事
+            - 术语照 glossary 统一叫法，不得同物异名
+
+            生成规则（必须全部满足）：
+            - 并列条件必须拆成多条，禁止把多个并列条件挤进同一条 knowledge/pitfalls/generalMethod 或单个 formula（一个 formula 只表达一个条件）
+
+            字段约定（散文字段禁 LaTeX，违反会被驳回重写）：
+            - 散文字段 = knowledge 的 claim/premise/trap、pitfalls 的 claim/why、generalMethod 的 step/trick：只写纯中文叙述，简易数学用 Unicode 符号（± √ ≤ ≥ ⇔ →），禁止任何 LaTeX 源码（\\frac、\\sqrt、\\ge 等反斜杠命令，以及 ^{…}、_{…} 上/下标写法）
+            - LaTeX 只允许写进 formula（knowledge）字段
+            - 反例（禁止，模板会把 LaTeX 源码原样显示）："trap": "判别式 \\Delta\\le 0"
+            - 正例："trap": "写成 f\'(x)>0 会漏掉临界情形（本题 a=±√3）"
+
+            knowledge（知识点回顾，本题为哪几个考点服务）：每条 {"claim","formula","premise","trap"}
+            - claim：一句话知识点断言（中文）
+            - formula：配套公式，KaTeX 源码（不用 $ 定界符）
+            - premise：使用前提/适用条件
+            - trap：常见易错点（尽量与本题相关）
+
+            pitfalls（易错警示）：每条 {"claim","why"}
+            - claim：错误做法（一句话）
+            - why：为什么错、会丢什么
+
+            generalMethod（通用方法论，以后遇到同类题怎么做）：每条 {"step","trick"}
+            - step：第几步做什么（识别/转化/求解回验式的通用流程）
+            - trick：这一步的口诀/技巧
+
+            卡片文字硬约束（防渲染溢出；实证多轮驳回同因，必须全部满足）：
+            - generalMethod 每条：step 以「≤6 字标签：说明」开头（如「识别：可导函数加区间单调」），step 整行 ≤ 24 字，trick ≤ 40 字，step 与 trick 内不放公式
+            - pitfalls 每条：claim ≤ 20 字，why ≤ 40 字
+            - 反例（实证驳回同因，禁止）：step/标签过长竖向拆行、卡片文字出缘
+
+            示例（golden 素材三段，题目：f(x)=x^{3}+ax^{2}+x 在 R 上单调递增求 a；plan：counts={knowledge:3,pitfalls:2,generalMethod:3}，anchors=["L1","L2","L2","L3","L3"]；steps 成品随载荷给出，此处从略）：
+
+            {
+              "knowledge": [
+                {
+                  "claim": "可导函数在区间上单调递增，等价于导数在该区间恒非负",
+                  "formula": "f(x)\\\\text{ 在 }I\\\\text{ 单调递增}\\\\iff f'(x)\\\\ge 0",
+                  "premise": "f(x) 在区间内可导；考纲默认单调递增允许导数个别零点",
+                  "trap": "写成 f'(x)>0 会漏掉临界情形（本题 a=±√3）"
+                },
+                {
+                  "claim": "二次不等式在全体实数上恒成立的判别法",
+                  "formula": "ax^{2}+bx+c\\\\ge 0\\\\iff a>0\\\\text{ 且 }\\\\Delta=b^{2}-4ac\\\\le 0",
+                  "premise": "二次项系数符号必须先确认",
+                  "trap": "忽略开口方向，只看判别式"
+                },
+                {
+                  "claim": "恒成立问题两条常用路径：判别式法、分离参数法",
+                  "formula": "\\\\Delta\\\\le 0\\\\quad\\\\text{或}\\\\quad a\\\\ge g(x)_{\\\\max}",
+                  "premise": "含二次结构优先判别式；参数能干净分离时用分离参数",
+                  "trap": "端点开闭要单独检验取等情形"
+                }
               ],
               "pitfalls": [
                 {
@@ -243,7 +287,9 @@ public final class Prompts {
                   "trick": "取等情形代回验证单调性"
                 }
               ]
+            }
             }""";
+;
 
     /**
      * GEN-P3..Pn 场景片工位：题干 + 素材 + 本片场景计划 + 术语表 → scenes 切片。
