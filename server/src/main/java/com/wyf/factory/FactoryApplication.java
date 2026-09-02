@@ -7,7 +7,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
- * 考研数学讲题视频工厂服务入口。
+ * 考研讲题视频工厂服务入口（T28 科目中性化：覆盖数学、408、信号与系统等考研科目）。
  */
 @SpringBootApplication
 @EnableConfigurationProperties(AppProperties.class)

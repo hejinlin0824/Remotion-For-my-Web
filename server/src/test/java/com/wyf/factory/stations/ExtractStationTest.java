@@ -152,7 +152,7 @@ class ExtractStationTest {
         assertThat(result.problemType()).isEqualTo("应用题");
         assertThat(result.lines()).hasSize(2);
         assertThat(result.lines().get(1).segments().get(0).value()).contains("p->next");
-        // 科目放开不走废题通道：无 notQuestion 字段的正常形状原样解析（TEXT 通道永不过闸的既有语义）
+        // 科目放开不走废题通道：无 notQuestion 字段的正常形状原样解析（TEXT 不过的是 T27 确认闸；废题判定两通道都有）
         assertThat(result.lines().get(0).segments().get(1).value()).isEqualTo("O(n)");
     }
 
