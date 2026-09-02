@@ -59,6 +59,19 @@ class V4JudgeTest {
     }
 
     @Test
+    @DisplayName("T28 科目中性化：V4 终审词「考研阅卷专家/考研讲题视频」，判据「推理/计算正确」替代「数学正确」；五项审查结构不变")
+    void systemPromptIsSubjectNeutral() {
+        assertThat(V4Judge.SYSTEM_PROMPT)
+                .contains("你是考研阅卷专家，负责终审一份考研讲题视频的 content.json")
+                .contains("解题步骤推理/计算正确、推导无跳跃")
+                .as("中性化钉子：不再出现「考研数学」限定")
+                .doesNotContain("考研数学")
+                .as("五项审查与输出格式锚点原样（PASS/REJECT 协议零变化）")
+                .contains("请逐项审查以下五点，任何一点不成立即 REJECT")
+                .contains("首行必须且只能是 PASS 或 REJECT");
+    }
+
+    @Test
     @DisplayName("REJECT + 理由行 → fail，理由逐条进 errors")
     void rejectPathWithReasons() throws Exception {
         when(glm.chat(eq(V4Judge.SYSTEM_PROMPT), anyString()))

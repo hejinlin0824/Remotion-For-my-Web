@@ -17,14 +17,14 @@ import java.util.Set;
  * <p>TEXT 路径 user 载荷 = 原题文本；IMAGE 路径走 {@link GlmClient#chatWithImage}。
  * GLM 返回 JSON 容忍 ```json 代码块包裹（先剥围栏再解析）。</p>
  *
- * <p>失败语义：{@code {"error":"..."}} → {@link FatalExtractException}（读不出题/非数学题，
+ * <p>失败语义：{@code {"error":"..."}} → {@link FatalExtractException}（读不出题/非可讲解题目，
  * 换素材重试，同素材不重试）；非 JSON/缺字段/段结构非法 → {@link GlmException}(retryable=true)
  * （消息含原始响应截断 500 字符），由调用方按内容工位重试策略整体重试。</p>
  */
 @Component
 public class ExtractStation {
 
-    /** 审题判死：GLM 明确说读不出题/不是数学题，重试同一素材无意义。 */
+    /** 审题判死：GLM 明确说读不出题/不是可讲解的考研题目（T28 科目中性化），重试同一素材无意义。 */
     public static final class FatalExtractException extends RuntimeException {
         public FatalExtractException(String message) {
             super(message);
@@ -62,11 +62,11 @@ public class ExtractStation {
         if (root.path("error").isTextual()) {
             throw new FatalExtractException("审题失败：" + root.get("error").asText());
         }
-        // T27 废题判定（TEXT/IMAGE 两通道同规则）：模型判非数学题目 → 废题驳回（Fatal 通道，
+        // T27 废题判定（TEXT/IMAGE 两通道同规则；T28 判废口径放开到考研科目范围）：模型判非可讲解题目 → 废题驳回（Fatal 通道，
         // 不烧 extractRetries——同素材重试无意义）；reason 缺失兜底，绝不让空原因穿出
         if (root.path("notQuestion").asBoolean(false)) {
             String reason = root.path("reason").asText("").strip();
-            throw new FatalExtractException("上传/输入内容不是数学题目：" + (reason.isEmpty() ? "未说明原因" : reason));
+            throw new FatalExtractException("上传/输入内容不是可讲解的考研题目：" + (reason.isEmpty() ? "未说明原因" : reason));
         }
         JsonNode problemType = root.path("problemType");
         JsonNode lines = root.path("lines");

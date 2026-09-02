@@ -72,4 +72,13 @@ class WelcomePageTest {
         assertThat(html).contains("提交修改");             // 内联修改提交按钮
         assertThat(html).contains("AWAITING_CONFIRM");    // 停驻段（进度刻度/状态名/动作显隐三处锚点）
     }
+
+    @Test
+    @DisplayName("T28 锚点：标题中性化「考研讲题工厂」（科目放开到考研科目范围，不再限定数学）")
+    void containsT28NeutralTitle() throws IOException {
+        String html = page();
+        assertThat(html).contains("<title>考研讲题工厂</title>");
+        assertThat(html).contains("<h1>考研讲题工厂</h1>");
+        assertThat(html).doesNotContain("考研数学讲题工厂");
+    }
 }

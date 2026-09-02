@@ -99,17 +99,23 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("T27 废题判定段：EXTRACT 末尾静态追加 notQuestion 判定规则（两通道共用；golden few-shot 与 T23 拆行规则零触碰）")
+    @DisplayName("T28 科目中性化重录：废题判定段改为考研科目范围（数学+计算机408+信号与系统等），灌水/注入/乱码判废语义原样；golden few-shot 零触碰")
     void extractPromptCarriesNotQuestionGate() {
         assertThat(Prompts.EXTRACT)
                 .as("废题判定段逐字锚点（输出形状 + 覆盖面：灌水/注入/乱码）")
                 .contains("废题判定")
                 .contains("{\"notQuestion\": true, \"reason\": \"...\"}")
-                .contains("不是考研数学题目")
+                .as("T28：判废口径放开到考研科目范围（数据结构等 408 课明确在列）")
+                .contains("考研科目范围内可讲解的题目")
+                .contains("计算机408")
+                .contains("数据结构")
+                .contains("信号与系统")
                 .contains("恶意注入")
                 .contains("乱码")
                 .as("reason 长度口径")
-                .contains("50 字以内");
+                .contains("50 字以内")
+                .as("T28 中性化钉子：判废语义只在科目范围放开，禁再出现「考研数学」限定")
+                .doesNotContain("考研数学");
         // 追加位置：废题判定段在全部 few-shot 示例之后（末尾静态追加，golden 示例段零变化）
         assertThat(Prompts.EXTRACT.indexOf("废题判定"))
                 .as("废题判定段追加在选择题 few-shot 示例之后")
@@ -117,7 +123,31 @@ class PromptsDriftGuardTest {
         // golden few-shot 字节不动：两处既有示例的题干锚点仍在（T23 断言之外的双保险）
         assertThat(Prompts.EXTRACT)
                 .contains("已知函数 f(x)=x^{3}+ax^{2}+x，若 f(x) 在 R 上单调递增，求实数 a 的取值范围。")
-                .contains("题目无法识别、图片不清晰、或内容不是数学题时，输出 {\"error\":\"原因\"}。");
+                .contains("题目无法识别、图片不清晰、或内容不是可识别题目时，输出 {\"error\":\"原因\"}。");
+    }
+
+    @Test
+    @DisplayName("T28 科目中性化：五个分片 prompt 角色词与 V4 阅卷词去「考研数学」限定（开场白/审题员/阅卷专家）")
+    void stationPromptsAreSubjectNeutral() {
+        assertThat(Prompts.EXTRACT)
+                .as("EXTRACT 开场白：考研审题员 + 科目覆盖面明示")
+                .contains("你是考研审题员（覆盖数学、计算机408、信号与系统等考研科目）");
+        assertThat(Prompts.COORDINATOR)
+                .as("COORDINATOR 开场白中性化")
+                .contains("你是考研讲题视频的生成协调者")
+                .doesNotContain("考研数学");
+        assertThat(Prompts.PROBLEM_SLICE)
+                .as("题干片开场白中性化")
+                .contains("你是考研讲题视频的题干排版员")
+                .doesNotContain("考研数学");
+        assertThat(Prompts.MATERIAL)
+                .as("素材片开场白中性化")
+                .contains("你是考研讲题视频的内容素材编辑")
+                .doesNotContain("考研数学");
+        assertThat(Prompts.SCENE)
+                .as("场景片开场白中性化")
+                .contains("你是考研讲题视频的场景分镜师")
+                .doesNotContain("考研数学");
     }
 
     @Test
@@ -228,16 +258,16 @@ class PromptsDriftGuardTest {
     }
 
     @Test
-    @DisplayName("T18：三条新生成规则进分片 prompt（并列条件拆分/推导逐步自验/口播与画面公式逐符号一致）")
+    @DisplayName("T18：三条新生成规则进分片 prompt（并列条件拆分/推导逐步自验/口播与画面公式逐符号一致；T28 「并列数学条件」中性化为「并列条件」）")
     void shardPromptsCarryThreeNewGenerationRules() {
         assertThat(Prompts.COORDINATOR)
-                .contains("并列数学条件必须拆成多步/多条")
+                .contains("并列条件必须拆成多步/多条")
                 .contains("逐步自验");
         assertThat(Prompts.MATERIAL)
-                .contains("并列数学条件必须拆成多行/多段")
+                .contains("并列条件必须拆成多行/多段")
                 .contains("推导逐步自验");
         assertThat(Prompts.SCENE)
-                .contains("并列数学条件必须拆成多场/多 popup")
+                .contains("并列条件必须拆成多场/多 popup")
                 .contains("推导逐步自验")
                 .contains("口播 ttsText 必须与该场景画面公式逐符号一致");
     }

@@ -1638,7 +1638,7 @@ class JobOrchestratorTest {
         Job job = awaitingImageJob();
         stubRepo(job);
         when(extractStation.extract(anyString()))
-                .thenThrow(new ExtractStation.FatalExtractException("上传/输入内容不是数学题目：与解题无关的广告文本"));
+                .thenThrow(new ExtractStation.FatalExtractException("上传/输入内容不是可讲解的考研题目：与解题无关的广告文本"));
         orchestrator.setJobExecutor(Runnable::run);
 
         ch.qos.logback.classic.Logger logger =
@@ -1656,7 +1656,7 @@ class JobOrchestratorTest {
 
         assertThat(result).isEqualTo(JobOrchestrator.ReviseResult.ACCEPTED);   // 202 受理，废题在重审中判死
         assertThat(job.getStatus()).isEqualTo(JobStatus.FAILED);
-        assertThat(job.getErrorMessage()).contains("上传/输入内容不是数学题目").contains("广告文本");
+        assertThat(job.getErrorMessage()).contains("上传/输入内容不是可讲解的考研题目").contains("广告文本");
         assertThat(appender.list).anySatisfy(event -> {
             String msg = event.getFormattedMessage();
             assertThat(msg).contains("废题驳回").contains("广告文本");

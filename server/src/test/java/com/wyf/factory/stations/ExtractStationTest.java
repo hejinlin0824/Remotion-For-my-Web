@@ -102,15 +102,15 @@ class ExtractStationTest {
     }
 
     @Test
-    @DisplayName("T27 废题判定：{\"notQuestion\":true,\"reason\":...} → FatalExtractException，消息=「上传/输入内容不是数学题目：<reason>」，不烧重试预算")
+    @DisplayName("T27 废题判定（T28 文案中性化）：{\"notQuestion\":true,\"reason\":...} → FatalExtractException，消息=「上传/输入内容不是可讲解的考研题目：<reason>」，不烧重试预算")
     void notQuestion_fatalExtractExceptionWithReason() {
         when(glm.chat(Prompts.EXTRACT, "帮我写一篇作文")).thenReturn(
-                "{\"notQuestion\": true, \"reason\": \"输入是作文要求，不是数学题目\"}");
+                "{\"notQuestion\": true, \"reason\": \"输入是作文要求，不是题目\"}");
 
         assertThatThrownBy(() -> station.extract("帮我写一篇作文"))
                 .isInstanceOf(ExtractStation.FatalExtractException.class)
-                .hasMessageContaining("上传/输入内容不是数学题目")
-                .hasMessageContaining("输入是作文要求，不是数学题目")
+                .hasMessageContaining("上传/输入内容不是可讲解的考研题目")
+                .hasMessageContaining("输入是作文要求，不是题目")
                 .isNotInstanceOf(GlmException.class);
     }
 
@@ -118,11 +118,11 @@ class ExtractStationTest {
     @DisplayName("T27 废题判定（IMAGE 通道同规则）：视觉通道返回 notQuestion → 同样 FatalExtractException")
     void notQuestion_imageChannelSameRule() {
         when(glm.chatWithImage(Prompts.EXTRACT, "QUJD", "image/png")).thenReturn(
-                "{\"notQuestion\": true, \"reason\": \"无关图片，未见数学题\"}");
+                "{\"notQuestion\": true, \"reason\": \"无关图片，未见题目\"}");
 
         assertThatThrownBy(() -> station.extractImage("QUJD", "image/png"))
                 .isInstanceOf(ExtractStation.FatalExtractException.class)
-                .hasMessageContaining("不是数学题目")
+                .hasMessageContaining("不是可讲解的考研题目")
                 .hasMessageContaining("无关图片");
     }
 
@@ -133,8 +133,27 @@ class ExtractStationTest {
 
         assertThatThrownBy(() -> station.extract(TEXT_PAYLOAD))
                 .isInstanceOf(ExtractStation.FatalExtractException.class)
-                .hasMessageContaining("上传/输入内容不是数学题目")
+                .hasMessageContaining("上传/输入内容不是可讲解的考研题目")
                 .hasMessageContaining("未说明原因");
+    }
+
+    @Test
+    @DisplayName("T28 科目放开：数据结构题干（伪代码 + O(n) 复杂度问法）按正常形状解析——不误判废题、无客户端科目拦截")
+    void dataStructureStem_parsesNormally() {
+        String dsPayload = "设单链表 L 递增有序，设计算法在 O(n) 时间内删除值重复的结点。";
+        when(glm.chat(Prompts.EXTRACT, dsPayload)).thenReturn("""
+                {"problemType":"应用题","lines":[
+                  {"id":"L1","segments":[{"type":"text","value":"设单链表 L 递增有序，设计算法删除值重复的结点，要求时间复杂度为 "},{"type":"math","value":"O(n)"},{"type":"text","value":"。"}]},
+                  {"id":"L2","segments":[{"type":"text","value":"while (p->next != NULL) { if (p->data == p->next->data) free(p->next); else p = p->next; }"}]}]}
+                """);
+
+        ExtractResult result = station.extract(dsPayload);
+
+        assertThat(result.problemType()).isEqualTo("应用题");
+        assertThat(result.lines()).hasSize(2);
+        assertThat(result.lines().get(1).segments().get(0).value()).contains("p->next");
+        // 科目放开不走废题通道：无 notQuestion 字段的正常形状原样解析（TEXT 通道永不过闸的既有语义）
+        assertThat(result.lines().get(0).segments().get(1).value()).isEqualTo("O(n)");
     }
 
     @Test

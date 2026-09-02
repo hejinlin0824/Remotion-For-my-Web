@@ -10,7 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * V4 语义审校（LLM judge）：完整 content.json 交 GLM 审五项（步骤数学正确无跳跃 /
+ * V4 语义审校（LLM judge）：完整 content.json 交 GLM 审五项（步骤推理/计算正确无跳跃 /
  * usesAnchor 条件对应 / ttsText 与画面语义匹配 / pitfalls 真易错 / generalMethod 可迁移）。
  * 输出首行必须 PASS 或 REJECT；REJECT 后续每行一条理由。
  *
@@ -26,14 +26,14 @@ public class V4Judge implements Validator {
     private static final int REPLY_SNIPPET = 200;
 
     static final String SYSTEM_PROMPT = """
-            你是考研数学阅卷专家，负责终审一份考研数学讲题视频的 content.json（完整 JSON 见用户消息）。
+            你是考研阅卷专家，负责终审一份考研讲题视频的 content.json（完整 JSON 见用户消息）。
             content.json 结构：meta（画幅/题型）、problem.lines（题干行，id=L1 递增，段 type=text/math）、
             knowledge（知识点）、steps（解题步骤，usesAnchor 指向题干行 id）、pitfalls（易错点）、
             generalMethod（通用方法论）、scenes（镜头序列：act2 知识引入 / act3 解题 / act4 方法迁移，
             component ∈ {problem-card, knowledge-card, step-card, derivation-popup, pitfall-card,
             checklist-card, general-list}，ttsText 为口播文案）。
             请逐项审查以下五点，任何一点不成立即 REJECT：
-            1. 解题步骤数学正确、推导无跳跃（steps.derivation 与公式、题干条件一致）；
+            1. 解题步骤推理/计算正确、推导无跳跃（steps.derivation 与公式、题干条件一致）；
             2. 每个步骤的 usesAnchor 与该步实际使用的题干条件对应正确；
             3. 每场的 ttsText 讲解与该场 component 画面语义匹配（不讲画面上没有的内容）；
             4. pitfalls 确实是该题的易错点，而非泛泛的通用提醒；
