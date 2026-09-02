@@ -20,6 +20,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * （逐字断言消息，消息自带路由令牌）；边界等价值（题干宽 W 恰 2120=scale 0.6 不违规 /
  * 2121 级别违规；字数恰等上限不违规；\frac 分子恰 4 字符不违规；列表 scale 在预算与
  * 下限之间不违规）。
+ *
+ * <p>T29 追加 R-宽度③ 卡片公式宽度（事故 daf87d4c：长不等式链在步骤卡/推演卡内折行，
+ * 场景片重做同病复发——超宽公式便宜地过 V1 到昂贵 QA 才被抓）：derivation 60 码点过 /
+ * 61 码点驳、popup formula 31 过 / 32 驳（消息含 steps[i]/场景 id 路由令牌与真实数值）；
+ * 另以「预算钉子」测试把两个上限值钉在 golden few-shot 实测最大码点上（单源自证）。</p>
  */
 class V1BudgetTest {
 
@@ -215,7 +220,76 @@ class V1BudgetTest {
         assertThat(result.pass()).as("非末条 derivation 不属结论卡，实际错误：%s", result.errors()).isTrue();
     }
 
+    // ---- R-宽度③ 卡片公式宽度（T29，事故 daf87d4c） ----
+
+    @Test
+    @DisplayName("R-宽度③边界：steps derivation 恰 60 码点（golden 最长链同长）不违规 / 61 码点驳（消息含 steps 令牌与真实数值 → P2）")
+    void stepDerivation_boundaryAndOffByOne() throws Exception {
+        assertThat(validateOf(mutate(r -> step(r, 0).put("derivation", "a".repeat(60)))).pass()).isTrue();
+        assertThat(errorsOf(mutate(r -> step(r, 0).put("derivation", "a".repeat(61))))).contains(
+                "V1/公式宽: steps[0].derivation 第 1 步公式 61 码点超出 60 上限（步骤卡公式盒装不下，KaTeX 将折行）；请拆成多步/多条公式");
+    }
+
+    @Test
+    @DisplayName("R-宽度③多步：两步同时超限各报一条、第 i 步序数正确；末步同触 R-字符① 结论卡规则互不吞并")
+    void stepDerivation_multipleViolations() throws Exception {
+        var bad = mutate(r -> {
+            step(r, 1).put("derivation", "b".repeat(65));
+            step(r, 4).put("derivation", "c".repeat(70));
+        });
+
+        var widthErrors = errorsOf(bad).stream().filter(e -> e.startsWith("V1/公式宽:")).toList();
+
+        assertThat(widthErrors).containsExactly(
+                "V1/公式宽: steps[1].derivation 第 2 步公式 65 码点超出 60 上限（步骤卡公式盒装不下，KaTeX 将折行）；请拆成多步/多条公式",
+                "V1/公式宽: steps[4].derivation 第 5 步公式 70 码点超出 60 上限（步骤卡公式盒装不下，KaTeX 将折行）；请拆成多步/多条公式");
+        assertThat(errorsOf(bad)).contains(
+                "V1/字数超限: steps[4].derivation 长度 70 码点超出上限 40（结论卡）");
+    }
+
+    @Test
+    @DisplayName("R-宽度③边界：derivation-popup formula 恰 31 码点不违规 / 32 码点驳（消息含场景 id+scenes 下标路由令牌 → 场景片）")
+    void popupFormula_boundaryAndOffByOne() throws Exception {
+        assertThat(validateOf(mutate(r -> popupFormula(r, "s06").put("formula", "a".repeat(31)))).pass()).isTrue();
+        assertThat(errorsOf(mutate(r -> popupFormula(r, "s06").put("formula", "a".repeat(32))))).contains(
+                "V1/公式宽: scenes[5] s06 derivation-popup formula 32 码点超出 31 上限（推演卡装不下，KaTeX 将折行）；请缩短为该步推导的关键主式");
+    }
+
+    @Test
+    @DisplayName("R-宽度③预算钉子（T29）：两个上限值钉在 golden few-shot 实测码点上——derivation 上限 60 = golden 最大 derivation 码点数；popup 上限 31 ≥ golden 最大 popup formula 码点数")
+    void formulaWidthLimits_pinnedToGoldenFewShot() throws Exception {
+        var golden = loadGolden();
+        int maxDerivation = golden.steps().stream()
+                .mapToInt(s -> codePointsOf(s.derivation())).max().orElse(0);
+        int maxPopup = golden.scenes().stream()
+                .filter(s -> "derivation-popup".equals(s.component()))
+                .mapToInt(s -> codePointsOf(String.valueOf(s.props().get("formula"))))
+                .max().orElse(0);
+
+        assertThat(maxDerivation).as("golden 最大 derivation 码点数（45/38/60 中的 60）。"
+                + "此钉子先红 = golden few-shot 公式变长 → R-宽度③ 上限须重新推导（否则 golden 回归即红）").isEqualTo(60);
+        assertThat(maxPopup).as("golden 最大 popup formula 码点数（18/21 中的 21），31 上限须始终容纳它").isEqualTo(21);
+    }
+
     // ---- helpers ----
+
+    /** 码点数（fit.ts [...tex].length 口径）。 */
+    private static int codePointsOf(String value) {
+        return value == null ? 0 : (int) value.codePoints().count();
+    }
+
+    /** 按场景 id 取 derivation-popup 的 props 节点（golden 场景结构固定，测试前提失效即抛）。 */
+    private static ObjectNode popupFormula(ObjectNode root, String sceneId) {
+        ArrayNode scenes = (ArrayNode) root.get("scenes");
+        for (int i = 0; i < scenes.size(); i++) {
+            ObjectNode scene = (ObjectNode) scenes.get(i);
+            if ("derivation-popup".equals(scene.path("component").asText())
+                    && sceneId.equals(scene.path("id").asText())) {
+                return (ObjectNode) scene.get("props");
+            }
+        }
+        throw new IllegalStateException("测试前提失效：golden 无 derivation-popup 场景 " + sceneId);
+    }
 
     private static ObjectNode step(ObjectNode root, int index) {
         return (ObjectNode) root.get("steps").get(index);

@@ -15,12 +15,15 @@ import java.util.Map;
  * 不改 template/ 任何文件（不触发 Ruling-16 重封版）。已知代价：模板预算将来改动须
  * 手工同步两侧。</p>
  *
- * <p><b>三组规则</b>（错误消息以 {@code V1/} 开头且自带路由令牌：
+ * <p><b>四组规则</b>（错误消息以 {@code V1/} 开头且自带路由令牌：
  * 「题干」→P1；{@code generalMethod[i]}/{@code pitfalls[i]}/{@code steps[i]}→P2，
- * 见 {@code GenShardPipeline.routeErrors}，驳回走分片级重做而非全片回退）：</p>
+ * 场景 id（s01）→对应场景片，见 {@code GenShardPipeline.routeErrors}，
+ * 驳回走分片级重做而非全片回退）：</p>
  * <ul>
  *   <li>R-宽度① 题干行宽：ProblemPanel 行级自适应，缩放 &lt; 0.6 → 违规</li>
  *   <li>R-宽度② 列表高度：GeneralList / ChecklistCard 高度自适应，缩放 &lt; 0.55 → 违规</li>
+ *   <li>R-宽度③ 卡片公式宽度（T29）：steps[].derivation ≤60 码点、
+ *       derivation-popup props.formula ≤31 码点，超出 → 违规</li>
  *   <li>R-字符① prompt 字数硬约束的确定性执行（散见于 stations/Prompts.java:123-125 的散文 → 机器检查）</li>
  * </ul>
  *
@@ -368,12 +371,83 @@ public final class V1Budget {
         return -1;
     }
 
+    // ---------------------------------------------------------------- R-宽度③ 卡片公式宽度
+
+    /**
+     * 步骤卡公式预算 <b>60 码点</b>（T29，事故 daf87d4c）。推导链（2026-09-02 模板亲勘复核，
+     * 与 brief 数字对平）：
+     * <ul>
+     *   <li>template/src/engine/layout.ts:16 「16:9」main.w = <b>1140</b>
+     *       （Act3Solution.tsx:60 卡片主区 = layout.main）</li>
+     *   <li>CardShell.tsx:7 padding 2×48 + border 2×2 → 卡内 <b>1040</b>（同 R-宽度② 扣 border 口径）</li>
+     *   <li>StepCard.tsx:14-15 公式盒 padding 2×28 → 盒内 <b>984</b>，Katex fontSize <b>54</b></li>
+     *   <li>DerivationPopup.tsx:11 无内层盒，Katex fontSize <b>56</b> → 可用 <b>1040</b></li>
+     * </ul>
+     *
+     * <p><b>镜像零松弛上限</b>（fit.ts:25 estimateMathWidth 口径：TeX 码点 × 0.6em × fontSize，
+     * 系数系统性偏高=保守安全）：floor(984/(0.6×54)) = 30 / floor(1040/(0.6×56)) = 30。
+     * <b>两处采纳值均偏离镜像值，缘由如下</b>：</p>
+     * <ul>
+     *   <li>derivation = <b>60</b>：brief 的 30 不可用——封版 golden few-shot 自身
+     *       （template/src/data/content.json）derivation 码点数实测 18/45/38/60/26，三条超 30，
+     *       30 上限首当其冲驳回 golden（违反「golden 零漂移」前提）。60 = golden 最大码点数
+     *       （回归绿物理下限，V1BudgetTest.formulaWidthLimits_pinnedToGoldenFewShot 钉住），
+     *       恰兜住事故实证病灶：该 job 超长链 62/67/85 码点全落闸内，实测装得下的 36/57/26 码点
+     *       （593/819/693px）全放行。headless 实测镜像高估 1.2-2.9 倍（golden 60 码点链实宽
+     *       799px &lt; 984px），粗网放过的边距误差由 QA 审帧兜底。</li>
+     *   <li>popup formula = <b>31</b>（brief 命令值；golden popup 18/21 码点容纳无虞）。
+     *       严格镜像为 30（扣 border 后 1040），取 31 系 1 码点松弛，远小于镜像系统性高估。</li>
+     * </ul>
+     *
+     * <p><b>折行形态</b>：Katex.tsx:10 maxWidth:100% + overflow:hidden → 超宽公式在 KaTeX
+     * span 边界<b>折行</b>（「≤」悬行尾、末项孤行）而非溢出，即事故画面形态——此规则把该病
+     * 从昂贵 QA 挪到 V1 秒级驳回。</p>
+     *
+     * <p><b>行为依赖</b>：模板重封版若改布局/字号须同步重算（L3 预算镜像既有约定）。
+     * 侦察结论：step-card 场景 props 只带 stepRef（ContentJson 契约），不携带公式副本——
+     * 步骤卡公式宽度唯一数据入口就是 steps[].derivation；derivation-popup 的 formula 与
+     * derivation 无逐字符绑定校验（golden s09 即短于 derivation 的关键主式先例），两闸各自独立。</p>
+     */
+    static final int STEP_DERIVATION_MAX_CODE_POINTS = 60;
+    /** 推演弹卡公式预算 31 码点（推导链见 {@link #STEP_DERIVATION_MAX_CODE_POINTS} javadoc）。 */
+    static final int POPUP_FORMULA_MAX_CODE_POINTS = 31;
+
+    /** R-宽度③：steps[].derivation 与 derivation-popup props.formula 逐条码点数闸。 */
+    private static void checkFormulaWidths(ContentJson content, List<String> errors) {
+        List<Material.Step> steps = content.steps() == null ? List.of() : content.steps();
+        for (int i = 0; i < steps.size(); i++) {
+            int length = codePoints(nz(steps.get(i).derivation()));
+            if (length > STEP_DERIVATION_MAX_CODE_POINTS) {
+                // steps[i] 令牌 → P2（拆步/拆公式只有素材片做得到）
+                errors.add(("V1/公式宽: steps[%d].derivation 第 %d 步公式 %d 码点超出 %d 上限"
+                        + "（步骤卡公式盒装不下，KaTeX 将折行）；请拆成多步/多条公式")
+                        .formatted(i, i + 1, length, STEP_DERIVATION_MAX_CODE_POINTS));
+            }
+        }
+        List<ContentJson.Scene> sceneList = scenes(content);
+        for (int i = 0; i < sceneList.size(); i++) {
+            ContentJson.Scene scene = sceneList.get(i);
+            if (!"derivation-popup".equals(scene.component())) {
+                continue;
+            }
+            Object formula = scene.props() == null ? null : scene.props().get("formula");
+            int length = codePoints(nz(formula == null ? null : String.valueOf(formula)));
+            if (length > POPUP_FORMULA_MAX_CODE_POINTS) {
+                // 场景 id 令牌 → 对应场景片（formula 可取该步关键主式缩短，golden s09 先例）
+                errors.add(("V1/公式宽: scenes[%d] %s derivation-popup formula %d 码点超出 %d 上限"
+                        + "（推演卡装不下，KaTeX 将折行）；请缩短为该步推导的关键主式")
+                        .formatted(i, scene.id(), length, POPUP_FORMULA_MAX_CODE_POINTS));
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- 入口与 helpers
 
-    /** 三组规则入口（V1Structural.validate() 尾部、checkProseNoLatex 之后调用）。 */
+    /** 四组规则入口（V1Structural.validate() 尾部、checkProseNoLatex 之后调用）。 */
     public static void check(ContentJson content, List<String> errors) {
         checkProblemLineWidths(content, errors);
         checkListHeights(content, errors);
+        checkFormulaWidths(content, errors);
         checkCharacterLimits(content, errors);
     }
 

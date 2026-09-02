@@ -265,6 +265,12 @@ class GenShardPipelineTest {
         // T23：题干宽消息末尾追加修复指引后仍路由 P1（尾缀不含场景 id/素材段令牌，不引诱误路由）
         assertThat(route("V1/题干宽: problem.lines[2] 估宽 2246px 超出题干面板预算（缩放 0.566 低于下限 0.6，渲染必溢出）；修复指引：把该行拆分为多行（选项各占一行）")
                 .summary()).isEqualTo("P1");
+        // T29 R-宽度③：derivation 公式宽消息自带 steps[i] 令牌 → P2（拆步归素材片）；
+        // popup formula 宽消息自带场景 id → 对应场景片（formula 可取关键主式缩短，场景片可修）
+        assertThat(route("V1/公式宽: steps[0].derivation 第 1 步公式 61 码点超出 60 上限（步骤卡公式盒装不下，KaTeX 将折行）；请拆成多步/多条公式")
+                .summary()).isEqualTo("P2");
+        assertThat(route("V1/公式宽: scenes[3] s04 derivation-popup formula 32 码点超出 31 上限（推演卡装不下，KaTeX 将折行）；请缩短为该步推导的关键主式")
+                .summary()).isEqualTo("P3:act3-a");
     }
 
     // ---- 2b. QA 排版类驳回路由（T24a，事故 001db856） ----

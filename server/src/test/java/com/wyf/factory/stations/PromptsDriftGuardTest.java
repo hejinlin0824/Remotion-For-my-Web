@@ -17,8 +17,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 分片 prompt 漂移守护（T6 评审 M 项起源，T18 分片生成重构<b>有意更新</b>，T20b 再重录：
  * COORDINATOR 末尾追加题型骨架段，T23 三重重录：EXTRACT 追加选项成行/长句拆行规则与
  * 选择题 few-shot、PROBLEM_SLICE 末尾追加行宽预算段（R1 修复轮：行数条款改为「以输入为
- * 准、不得自行增删行」，与保真红线/工位校验对齐），其余常量 golden few-shot 示例段
- * 零变化断言保留）：
+ * 准、不得自行增删行」，与保真红线/工位校验对齐），T29 事故驱动重录：MATERIAL 追加步骤卡
+ * 公式宽度规则、SCENE popup formula 加上限 31 改写条款（golden few-shot 示例段字节零动），
+ * 其余常量 golden few-shot 示例段零变化断言保留）：
  * golden（封版模板 template/src/data/content.json，只读单源）few-shot 必须在分片 prompt
  * 中逐字注入——题干片吃 golden problem 段、素材片吃 golden 四段素材、场景片吃 golden
  * scenes 切片（s10..s14）、协调者吃 golden 派生骨架（条数/锚点/全部场景 id）。
@@ -270,6 +271,30 @@ class PromptsDriftGuardTest {
                 .contains("并列条件必须拆成多场/多 popup")
                 .contains("推导逐步自验")
                 .contains("口播 ttsText 必须与该场景画面公式逐符号一致");
+    }
+
+    @Test
+    @DisplayName("T29 事故 daf87d4c 重录：MATERIAL 步骤卡 derivation 单行短公式 ≤30 字符（超长拆步）；SCENE popup formula ≤31 字符（默认照抄 derivation，照抄超长改写关键主式）；追加只在指令段，golden few-shot 示例段字节零动")
+    void shardPromptsCarryFormulaWidthRules() {
+        // MATERIAL：与 V1Budget R-宽度③（steps 上限 60=golden 最长链）同病灶的上游收紧口径
+        assertThat(Prompts.MATERIAL)
+                .as("步骤卡公式宽度规则逐字（30 字符为收紧目标，反例=事故不等式链形状）")
+                .contains("- 每步 derivation 是单行短公式：TeX 源码不超过 30 个字符（如 -\\frac{1}{2} \\le t \\le -\\frac{1}{4} 已是上限长度）；"
+                        + "更长的推导必须拆成多个步骤/多条公式，禁止单条塞入整条不等式链或长表达式");
+        assertThat(Prompts.MATERIAL.indexOf("每步 derivation 是单行短公式"))
+                .as("追加在卡片文字硬约束指令段内、golden few-shot 示例段之前")
+                .isLessThan(Prompts.MATERIAL.indexOf("示例（golden 素材"));
+        // SCENE：31 与 V1Budget.POPUP_FORMULA_MAX_CODE_POINTS 同数值（改写条款化解与照抄规则的冲突）
+        assertThat(Prompts.SCENE)
+                .as("popup formula 上限逐字")
+                .contains("formula 是单行短公式，TeX 源码不超过 31 个字符（如 -\\frac{1}{2} \\le t \\le -\\frac{1}{4} 已是上限长度）")
+                .as("默认照抄保留（口播/画面一致机制锚点），超长改写有出路（golden s09 关键主式先例）")
+                .contains("默认逐字符照抄 steps[N-1].derivation")
+                .contains("照抄会超出 31 个字符时改写为该步推导的关键主式")
+                .contains("禁止整条塞入长不等式链");
+        assertThat(Prompts.SCENE.indexOf("不超过 31 个字符"))
+                .as("修订只在 props 规则指令段、golden few-shot 示例段之前")
+                .isLessThan(Prompts.SCENE.indexOf("示例（golden 题"));
     }
 
     @Test
