@@ -189,7 +189,6 @@ public final class Prompts {
                   "note": "取得到等号，端点是闭的"
                 }
               ]
-            }
             }""";
 
     /**
@@ -287,9 +286,7 @@ public final class Prompts {
                   "trick": "取等情形代回验证单调性"
                 }
               ]
-            }
             }""";
-;
 
     /**
      * GEN-P3..Pn 场景片工位：题干 + 素材 + 本片场景计划 + 术语表 → scenes 切片。

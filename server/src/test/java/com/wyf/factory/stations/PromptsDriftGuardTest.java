@@ -1,11 +1,13 @@
 package com.wyf.factory.stations;
 
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -384,6 +386,37 @@ class PromptsDriftGuardTest {
                 .contains("knowledge")
                 .contains("pitfalls")
                 .contains("generalMethod");
+    }
+
+    @Test
+    @DisplayName("T30 评审 M-1 防复发：CORE/REST 内嵌 golden few-shot 示例是严格单值 JSON（尾部杂括号即红）且与金标逐段 deep 相等")
+    void materialFewShotExamplesAreStrictJsonMatchingGolden() throws Exception {
+        JsonNode golden = MAPPER.readTree(goldenFile.toFile());
+
+        JsonNode coreExample = strictParse(trailingExampleBlock(Prompts.MATERIAL_CORE));
+        assertThat(coreExample.path("steps")).as("CORE 示例（{\"steps\":[...]} 包装）deep 等于金标 steps 段")
+                .isEqualTo(golden.path("steps"));
+
+        JsonNode restExample = strictParse(trailingExampleBlock(Prompts.MATERIAL_REST));
+        assertThat(restExample.path("knowledge")).as("REST 示例 knowledge=金标").isEqualTo(golden.path("knowledge"));
+        assertThat(restExample.path("pitfalls")).as("REST 示例 pitfalls=金标").isEqualTo(golden.path("pitfalls"));
+        assertThat(restExample.path("generalMethod")).as("REST 示例 generalMethod=金标").isEqualTo(golden.path("generalMethod"));
+    }
+
+    /** 取常量末尾的内嵌示例块（最后一处行首 { 起步——输出形状行的 { 是行内不在此列）。 */
+    private static String trailingExampleBlock(String prompt) {
+        int brace = prompt.lastIndexOf("\n{");
+        assertThat(brace).as("内嵌示例块（行首 { 起步）存在").isGreaterThan(0);
+        return prompt.substring(brace + 1).strip();
+    }
+
+    /** 严格单值解析：readTree 默认容忍尾部 token，此处必须显式断言解析后无剩余（杂括号即红）。 */
+    private static JsonNode strictParse(String json) throws IOException {
+        try (JsonParser parser = MAPPER.createParser(json)) {
+            JsonNode tree = parser.readValueAsTree();
+            assertThat(parser.nextToken()).as("示例块必须恰好一个 JSON 值（无尾部杂括号）").isNull();
+            return tree;
+        }
     }
 
     @Test

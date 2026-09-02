@@ -312,11 +312,16 @@ public class GenShardPipeline {
             return List.of(P2B);
         }
         if (error.contains("条数")) {
-            if (containsAny(error, "knowledge", "pitfalls", "generalMethod")) {
-                return List.of(P2B);
-            }
+            List<String> both = new ArrayList<>();
             if (error.contains("steps")) {
-                return List.of(P2A);
+                both.add(P2A);
+            }
+            if (containsAny(error, "knowledge", "pitfalls", "generalMethod")) {
+                both.add(P2B);
+            }
+            if (!both.isEmpty()) {
+                // 双令牌条数消息（如「steps 与 knowledge 条数不一致」）两侧都修，评审 I-2 防御
+                return both;
             }
         }
         // ④ 题干保真（V2）→ P1
@@ -458,7 +463,9 @@ public class GenShardPipeline {
             }
             Map<String, List<String>> merged = new LinkedHashMap<>(byShard);
             if (byShard.containsKey(P2A)) {
-                merged.putIfAbsent(P2B, byShard.get(P2A));
+                // P2b 级联重做拿干净清单（评审 I-4）：steps 类错误在 P2b 的「必须全部修正」清单里
+                // 是改不动的噪声指令，与载荷「steps 只作上下文」约定冲突；P2b 自身有错时保留其清单。
+                merged.putIfAbsent(P2B, List.of());
             }
             List<String> materialErrors = merged.getOrDefault(P2B, List.of());
             for (SceneShard shard : shards) {
