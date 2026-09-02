@@ -575,7 +575,7 @@ function renderPlayer(v) {
 function renderFailure(v) {
   var dead = v.status === 'FAILED';
   $('fail-title').textContent = dead ? '任务失败' : '任务已取消';
-  var msg = v.lastError || v.errorMessage;
+  var msg = v.errorMessage || v.lastError; // 人话原因优先（T28 实战发现：废题驳回时 lastError 是 2000 字符堆栈尾，末位展示对用户是噪音）；取证堆栈仍可经 API lastError 字段查
   $('fail-error').textContent = msg ? (dead ? '失败原因：' : '取消说明：') + msg : '（无错误信息）';
   $('fail-panel').hidden = false;
   $('fail-table-wrap').hidden = false;
