@@ -152,9 +152,18 @@ public class QaFrameCheck {
     }
 
     /**
-     * exit!=0 的 fails 归因：report.md 含 FAIL 的行（模型判负）与独立 ERROR 行
+     * exit!=0 的 fails 归因：report.md 的<b>行首 FAIL 行</b>（模型判负，qa_glm 协议
+     * 「最后一行输出：PASS 或 FAIL（一句话理由）」）与独立 ERROR 行
      * （{@code ERROR <帧名>\t<摘要>}，qa_glm 单帧最终失败；Task 14b F3-R2 归因缺口）都收集，
      * ERROR 条目以 {@code [error] } 前缀区分；两者皆无 → 降级为 qa_glm exit=N（真崩溃兜底，现状保留）。
+     *
+     * <p><b>事故 b91e247a 锚（2026-09-03）</b>：旧条件 {@code contains("FAIL")} 把散文注记行
+     * （「…按红线清单不属于判 FAIL 项…」「…不影响题意，不判 FAIL。」）也当驳回错误收集——
+     * routeErrors 解析不出归属 → 保守 redoAll 全量重做（~17min），把本应 ~5min 的场景片级
+     * 重做（T24a：真 FAIL 行含「溢出/截断」排版词命中 P3）放大到烧穿剩余 60min 墙钟。
+     * 收紧为剥离行首 markdown 加粗符后 startsWith（防 {@code **FAIL**} 形态漏收）；
+     * ERROR 行逻辑不动。兼容核查：qa_glm 产出的 FAIL 行均为行首形态
+     * （历史报告 b91e247a/daf87d4c 各恰 1 条行首 FAIL，行中含 FAIL 字样的 3 行全为注记散文）。</p>
      */
     private List<String> collectFails(Path ws, ProcessResult qa) {
         List<String> fails = new ArrayList<>();
@@ -165,7 +174,7 @@ public class QaFrameCheck {
                     String trimmed = line.strip();
                     if (trimmed.startsWith("ERROR ")) {
                         fails.add("[error] " + trimmed.substring("ERROR ".length()));
-                    } else if (trimmed.contains("FAIL")) {
+                    } else if (isFailLine(trimmed)) {
                         fails.add(trimmed);
                     }
                 }
@@ -177,5 +186,15 @@ public class QaFrameCheck {
             fails.add(qa.timedOut() ? "qa_glm 超时" : "qa_glm exit=" + qa.exitCode());
         }
         return fails;
+    }
+
+    /** 行首 FAIL 判定：剥离行首 markdown 加粗符（{@code *}/{@code **}，防 {@code **FAIL**} 漏收）
+     * 后以 FAIL 起步；散文注记行（FAIL 在行中）不判（事故 b91e247a）。 */
+    private static boolean isFailLine(String line) {
+        int i = 0;
+        while (i < line.length() && line.charAt(i) == '*') {
+            i++;
+        }
+        return line.startsWith("FAIL", i);
     }
 }

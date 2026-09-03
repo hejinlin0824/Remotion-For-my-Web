@@ -23,7 +23,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * QaFrameCheck（fake ProcessRunner 注入，零真调、零 GLM 成本）：
  * pick_frames stdout 解析（totalFrames 行跳过/tab 分隔/前缀行名）、单次 qa_stills 批量调用
  * （manifest 内容=解析结果、非逐帧 N 次 spawn）、qa_stills stdout 失败行收集、
- * qa_glm key 只进子进程 env、exit=1 + report.md FAIL 行收集、独立 ERROR 行 → [error] 前缀收集
+ * qa_glm key 只进子进程 env、exit=1 + report.md FAIL 行收集（T31b 收紧：仅行首 FAIL，
+ * 散文注记行含「FAIL」字样不收——事故 b91e247a）、独立 ERROR 行 → [error] 前缀收集
  * （FAIL/ERROR 混合都收）、无 FAIL/ERROR 行 → ["qa_glm exit=N"] 兜底、空帧清单防呆。
  */
 class QaFrameCheckTest {
@@ -188,6 +189,36 @@ class QaFrameCheckTest {
 
         assertThat(result.pass()).isFalse();
         assertThat(result.fails()).containsExactly("qa_glm exit=1");
+    }
+
+    @Test
+    @DisplayName("T31b 事故 b91e247a 回归：散文注记行（…不属于判 FAIL 项/…不判 FAIL。）不收集，fails 恰好只含行首真 FAIL 行（**FAIL** 加粗形态仍收）")
+    void qaFails_proseFailMentionsNotCollected() throws Exception {
+        runner.pickFramesStdout = "totalFrames = 100\ns-s01-problem-card\t30\ns-s02-knowledge-card\t90\n";
+        runner.qaResult = new ProcessResult(1, "", "", false);
+        Path qaDir = ws.resolve("out/qa");
+        Files.createDirectories(qaDir);
+        Files.writeString(qaDir.resolve("report.md"), """
+                # GLM 审帧报告 — glm-5.3-flash
+
+                ## s-s01-problem-card.png
+
+                另注：「如下图所示」指代的波形图未出现在本帧内，但按红线清单不属于判 FAIL 项，且文字描述已完整给出波形定义。
+                其他：散文性描述中“除负数必翻不等号”属可理解的简写表达，不影响题意，不判 FAIL。
+                FAIL（主文字在卡片右边界被截断溢出，句子不完整，属排版崩坏红线3。）
+
+                ## s-s02-knowledge-card.png
+
+                **FAIL**（加粗形态的行首 FAIL 仍要收集）
+                """, StandardCharsets.UTF_8);
+
+        QaFrameCheck.QaResult result = qa.check(ws);
+
+        assertThat(result.pass()).isFalse();
+        assertThat(result.fails()).containsExactly(
+                "FAIL（主文字在卡片右边界被截断溢出，句子不完整，属排版崩坏红线3。）",
+                "**FAIL**（加粗形态的行首 FAIL 仍要收集）");
+        assertThat(result.framesChecked()).isEqualTo(2);
     }
 
     @Test
