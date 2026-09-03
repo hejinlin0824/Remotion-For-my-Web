@@ -15,7 +15,7 @@ import java.util.Map;
  * 不改 template/ 任何文件（不触发 Ruling-16 重封版）。已知代价：模板预算将来改动须
  * 手工同步两侧。</p>
  *
- * <p><b>四组规则</b>（错误消息以 {@code V1/} 开头且自带路由令牌：
+ * <p><b>五组规则</b>（错误消息以 {@code V1/} 开头且自带路由令牌：
  * 「题干」→P1；{@code generalMethod[i]}/{@code pitfalls[i]}/{@code steps[i]}→P2，
  * 场景 id（s01）→对应场景片，见 {@code GenShardPipeline.routeErrors}，
  * 驳回走分片级重做而非全片回退）：</p>
@@ -24,6 +24,7 @@ import java.util.Map;
  *   <li>R-宽度② 列表高度：GeneralList / ChecklistCard 高度自适应，缩放 &lt; 0.55 → 违规</li>
  *   <li>R-宽度③ 卡片公式宽度（T29）：steps[].derivation ≤60 码点、
  *       derivation-popup props.formula ≤31 码点，超出 → 违规</li>
+ *   <li>R-宽度④ 公式字段中文码点（T31a）：三类公式字段中文 &gt;5 字 → 违规</li>
  *   <li>R-字符① prompt 字数硬约束的确定性执行（散见于 stations/Prompts.java:123-125 的散文 → 机器检查）</li>
  * </ul>
  *
@@ -441,13 +442,89 @@ public final class V1Budget {
         }
     }
 
+    // ---------------------------------------------------------------- R-宽度④ 公式字段中文码点
+
+    /**
+     * 公式字段中文码点上限 <b>5</b>（T31a，事故 b91e247a）：知识卡公式以 <b>58 号字</b>渲染
+     * （template/src/acts/components/KnowledgeCard.tsx:11 {@code Katex fontSize 58}；步骤卡 54 /
+     * 推演卡 56 同量级），GLM 把整句中文塞进 knowledge[2].formula 的 {@code \text{}}（12 中文字），
+     * 58 号字下右边界爆框截断 → QA FAIL。既有闸管不到中文内容——R-宽度③ 数的是总码点、
+     * R-字符① 只查结论卡与散文字段——本规则补盲区（T29 评审 M-3 顺延项兑现）。
+     *
+     * <p><b>实勘边界（2026-09-03 双方 content.json 亲核复算）</b>：golden 三类公式字段中文数
+     * derivation {0,5,1,0,0} / knowledge.formula {5,1,1} / popup {0,0}，最大 <b>5</b>
+     * （「在/且/或/上恒成立/单调递增」这类 1~4 字衔接词，恰 5 过 → 零误杀金标）；
+     * 事故 formula <b>12</b>（整句中文）必杀；6~11 为未标定灰区——由 prompt 上游收紧
+     * （stations/Prompts.java 三处硬约束）+ QA 审帧视觉兜底（与 T29「60=已知最大能放/
+     * 62=已知最小翻车」同一经验边界方法论）。一刀切「禁 CJK」会驳金标（golden 公式本就含
+     * 中文衔接词），必须计数闸。口径 = {@link #isCjk}（fit.ts 惯例）。</p>
+     */
+    static final int FORMULA_FIELD_MAX_CJK = 5;
+
+    /** R-宽度④：steps[].derivation / knowledge[].formula / derivation-popup props.formula
+     * 逐条中文码点数闸。三类消息各带路由令牌（同 T29 两条消息形态）：
+     * steps[i]→P2a、knowledge[i]→P2b、场景 id→对应场景片，消息尾带修复指引。 */
+    private static void checkFormulaCjk(ContentJson content, List<String> errors) {
+        List<Material.Step> steps = content.steps() == null ? List.of() : content.steps();
+        for (int i = 0; i < steps.size(); i++) {
+            int count = countCjk(nz(steps.get(i).derivation()));
+            if (count > FORMULA_FIELD_MAX_CJK) {
+                // steps[i] 令牌 → P2a；中文说明只有素材核心片做得到（statement/note 是它的字段）
+                errors.add(("V1/公式中文: steps[%d].derivation 公式含中文 %d 字超出 %d 字上限"
+                        + "（步骤卡公式 54 号字渲染，中文整句必爆框）；中文说明请写入 statement/note，"
+                        + "公式内 \\text{} 只允许 1~4 字衔接词（如 在/且/或）")
+                        .formatted(i, count, FORMULA_FIELD_MAX_CJK));
+            }
+        }
+        List<Material.Knowledge> knowledge = content.knowledge() == null
+                ? List.of() : content.knowledge();
+        for (int i = 0; i < knowledge.size(); i++) {
+            int count = countCjk(nz(knowledge.get(i).formula()));
+            if (count > FORMULA_FIELD_MAX_CJK) {
+                // knowledge[i] 令牌 → P2b（formula 是 P2b 字段，事故 b91e247a 即此槽位）
+                errors.add(("V1/公式中文: knowledge[%d].formula 公式含中文 %d 字超出 %d 字上限"
+                        + "（知识卡公式 58 号字渲染，中文整句右边界爆框截断）；中文说明请写入 claim/premise/trap，"
+                        + "公式内 \\text{} 只允许 1~4 字衔接词（如 在/且/或）")
+                        .formatted(i, count, FORMULA_FIELD_MAX_CJK));
+            }
+        }
+        List<ContentJson.Scene> sceneList = scenes(content);
+        for (int i = 0; i < sceneList.size(); i++) {
+            ContentJson.Scene scene = sceneList.get(i);
+            if (!"derivation-popup".equals(scene.component())) {
+                continue;
+            }
+            Object formula = scene.props() == null ? null : scene.props().get("formula");
+            int count = countCjk(nz(formula == null ? null : String.valueOf(formula)));
+            if (count > FORMULA_FIELD_MAX_CJK) {
+                // 场景 id 令牌 → 对应场景片（formula 归场景分镜改写，golden s09 关键主式先例）
+                errors.add(("V1/公式中文: scenes[%d] %s derivation-popup formula 公式含中文 %d 字超出 %d 字上限"
+                        + "（推演卡公式 56 号字渲染，中文整句必爆框）；中文说明请写入对应步的 statement/note，"
+                        + "公式内 \\text{} 只允许 1~4 字衔接词（如 在/且/或）")
+                        .formatted(i, scene.id(), count, FORMULA_FIELD_MAX_CJK));
+            }
+        }
+    }
+
+    /** 中文码点计数（isCjk 口径：CJK 部首/统一表意/兼容表意/全角形态）。 */
+    private static int countCjk(String text) {
+        int count = 0;
+        for (int cp : text.codePoints().toArray()) {
+            if (isCjk(cp)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     // ---------------------------------------------------------------- 入口与 helpers
 
-    /** 四组规则入口（V1Structural.validate() 尾部、checkProseNoLatex 之后调用）。 */
+    /** 五组规则入口（V1Structural.validate() 尾部、checkProseNoLatex 之后调用）。 */
     public static void check(ContentJson content, List<String> errors) {
         checkProblemLineWidths(content, errors);
         checkListHeights(content, errors);
         checkFormulaWidths(content, errors);
+        checkFormulaCjk(content, errors);
         checkCharacterLimits(content, errors);
     }
 

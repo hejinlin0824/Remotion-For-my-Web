@@ -29,7 +29,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 中逐字注入——题干片吃 golden problem 段、素材核心片吃 golden steps 段、素材周边片吃
  * golden knowledge/pitfalls/generalMethod 段、场景片吃 golden scenes 切片（s10..s14）、
  * 协调者吃 golden 派生骨架（条数/锚点/全部场景 id）。
- * 另守卡片文字硬约束段（结论卡/步骤卡公式宽度归 CORE；generalMethod/pitfalls 字数归 REST）。
+ * 另守卡片文字硬约束段（结论卡/步骤卡公式宽度归 CORE；generalMethod/pitfalls 字数归 REST；
+ * T31a 事故 b91e247a 重录：三类公式字段中文 ≤5 硬约束归 CORE（derivation）/REST（knowledge
+ * formula）/SCENE（popup formula），并新增 golden 直读回归——golden 三个公式字段中文全部 ≤5）。
  */
 class PromptsDriftGuardTest {
 
@@ -417,6 +419,68 @@ class PromptsDriftGuardTest {
             assertThat(parser.nextToken()).as("示例块必须恰好一个 JSON 值（无尾部杂括号）").isNull();
             return tree;
         }
+    }
+
+    @Test
+    @DisplayName("T31a 事故 b91e247a 重录：三类公式字段中文 ≤5 硬约束归位（CORE=derivation / REST=knowledge.formula / SCENE=popup formula 与 ≤31 条款并排）；追加只在指令段，golden few-shot 示例段字节零动")
+    void shardPromptsCarryFormulaCjkRules() {
+        assertThat(Prompts.MATERIAL_CORE)
+                .as("derivation 中文 ≤5 条款逐字（与 V1Budget R-宽度④ 同数值，整句中文走 statement/note）")
+                .contains("- derivation 全程中文字符 ≤5：公式内 \\text{} 只允许 1~4 字衔接词（如 在/且/或），"
+                        + "禁止把中文整句说明塞进公式；整句中文说明一律写 statement/note");
+        assertThat(Prompts.MATERIAL_CORE.indexOf("全程中文字符 ≤5"))
+                .as("追加在指令段、golden few-shot 示例段之前")
+                .isLessThan(Prompts.MATERIAL_CORE.indexOf("示例（golden"));
+        assertThat(Prompts.MATERIAL_REST)
+                .as("knowledge formula 中文 ≤5 条款逐字（整句中文走 claim/premise/trap）")
+                .contains("- knowledge 的 formula 全程中文字符 ≤5：公式内 \\text{} 只允许 1~4 字衔接词（如 在/且/或），"
+                        + "禁止把中文整句说明塞进公式；整句中文说明一律写 claim/premise/trap");
+        assertThat(Prompts.MATERIAL_REST.indexOf("全程中文字符 ≤5"))
+                .as("追加在指令段、golden few-shot 示例段之前")
+                .isLessThan(Prompts.MATERIAL_REST.indexOf("示例（golden"));
+        assertThat(Prompts.SCENE)
+                .as("popup formula 中文 ≤5 与既有 ≤31 改写条款并排（同一行尾部追加）")
+                .contains("禁止整条塞入长不等式链，公式内中文字符 ≤5（\\text{} 只允许 1~4 字衔接词，禁止整句中文说明）");
+        assertThat(Prompts.SCENE.indexOf("公式内中文字符 ≤5"))
+                .as("追加在 props 指令段、golden few-shot 示例段之前")
+                .isLessThan(Prompts.SCENE.indexOf("示例（golden 题"));
+    }
+
+    @Test
+    @DisplayName("T31a golden 直读回归：golden 三个公式字段（steps[].derivation / knowledge[].formula / popup props.formula）中文全部 ≤5 字（零漂移牙齿，R-宽度④ 零误杀金标）")
+    void goldenFormulaFieldsStayWithinCjkBudget() throws Exception {
+        JsonNode golden = MAPPER.readTree(goldenFile.toFile());
+        for (JsonNode step : golden.path("steps")) {
+            assertThat(cjkCount(step.path("derivation").asText()))
+                    .as("golden steps[].derivation 中文 ≤5（%s）", step.path("derivation").asText())
+                    .isLessThanOrEqualTo(5);
+        }
+        for (JsonNode item : golden.path("knowledge")) {
+            assertThat(cjkCount(item.path("formula").asText()))
+                    .as("golden knowledge[].formula 中文 ≤5（%s）", item.path("formula").asText())
+                    .isLessThanOrEqualTo(5);
+        }
+        for (JsonNode scene : golden.path("scenes")) {
+            if ("derivation-popup".equals(scene.path("component").asText())) {
+                assertThat(cjkCount(scene.path("props").path("formula").asText()))
+                        .as("golden %s popup props.formula 中文 ≤5", scene.path("id").asText())
+                        .isLessThanOrEqualTo(5);
+            }
+        }
+    }
+
+    /** 中文码点计数（V1Budget.isCjk 惯例口径：0x2e80-0x9fff ∪ 0xf900-0xfaff ∪ 0xff00-0xffef）。 */
+    private static int cjkCount(String value) {
+        int count = 0;
+        for (int i = 0; i < value.length(); ) {
+            int cp = value.codePointAt(i);
+            if ((cp >= 0x2e80 && cp <= 0x9fff) || (cp >= 0xf900 && cp <= 0xfaff)
+                    || (cp >= 0xff00 && cp <= 0xffef)) {
+                count++;
+            }
+            i += Character.charCount(cp);
+        }
+        return count;
     }
 
     @Test

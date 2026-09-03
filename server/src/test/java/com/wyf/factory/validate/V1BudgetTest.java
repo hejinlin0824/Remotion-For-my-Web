@@ -25,6 +25,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 场景片重做同病复发——超宽公式便宜地过 V1 到昂贵 QA 才被抓）：derivation 60 码点过 /
  * 61 码点驳、popup formula 31 过 / 32 驳（消息含 steps[i]/场景 id 路由令牌与真实数值）；
  * 另以「预算钉子」测试把两个上限值钉在 golden few-shot 实测最大码点上（单源自证）。</p>
+ *
+ * <p>T31a 追加 R-宽度④ 公式字段中文码点闸（事故 b91e247a：GLM 把整句中文塞进
+ * knowledge[2].formula 的 \text{}（12 中文字），知识卡公式 58 号字右边界爆框截断）：
+ * 三类公式字段（steps[].derivation / knowledge[].formula / popup props.formula）中文
+ * 恰 5 字（golden 实测最大）过 / 6 字驳 / 事故原式 12 字驳，消息各带路由令牌
+ * （steps[i]→P2a、knowledge[i]→P2b、场景 id→场景片）与修复指引。</p>
  */
 class V1BudgetTest {
 
@@ -271,7 +277,55 @@ class V1BudgetTest {
         assertThat(maxPopup).as("golden 最大 popup formula 码点数（18/21 中的 21），31 上限须始终容纳它").isEqualTo(21);
     }
 
+    // ---- R-宽度④ 公式字段中文码点闸（T31a，事故 b91e247a） ----
+
+    /** 事故 b91e247a 原式（knowledge[2].formula 形态：\text{} 内塞整句中文 12 字，58 号字爆框截断）。 */
+    private static final String ACCIDENT_FORMULA =
+            "f(-2t)\\text{ 为 }f(t)\\text{ 沿纵轴翻转并横轴压缩 }2\\text{ 倍}";
+
+    @Test
+    @DisplayName("R-宽度④边界：derivation 中文恰 5 字（golden 实测最大）不违规 / 6 字驳（消息含 steps[i] 令牌与修复指引 → P2a）")
+    void formulaCjk_derivationBoundary() throws Exception {
+        assertThat(validateOf(mutate(r -> step(r, 0).put("derivation", "在".repeat(5)))).pass()).isTrue();
+        assertThat(errorsOf(mutate(r -> step(r, 0).put("derivation", "在".repeat(6))))).contains(
+                "V1/公式中文: steps[0].derivation 公式含中文 6 字超出 5 字上限"
+                        + "（步骤卡公式 54 号字渲染，中文整句必爆框）；中文说明请写入 statement/note，"
+                        + "公式内 \\text{} 只允许 1~4 字衔接词（如 在/且/或）");
+    }
+
+    @Test
+    @DisplayName("R-宽度④边界：popup formula 中文恰 5 字不违规 / 6 字驳（消息含场景 id 令牌 → 场景片）")
+    void formulaCjk_popupBoundary() throws Exception {
+        assertThat(validateOf(mutate(r -> popupFormula(r, "s06").put("formula", "在".repeat(5)))).pass()).isTrue();
+        assertThat(errorsOf(mutate(r -> popupFormula(r, "s06").put("formula", "在".repeat(6))))).contains(
+                "V1/公式中文: scenes[5] s06 derivation-popup formula 公式含中文 6 字超出 5 字上限"
+                        + "（推演卡公式 56 号字渲染，中文整句必爆框）；中文说明请写入对应步的 statement/note，"
+                        + "公式内 \\text{} 只允许 1~4 字衔接词（如 在/且/或）");
+    }
+
+    @Test
+    @DisplayName("R-宽度④事故原式：knowledge formula 中文 12 字（b91e247a \\text{} 整句中文）驳回，消息含 knowledge[i] 令牌与修复指引 → P2b")
+    void formulaCjk_knowledgeAccidentForm() throws Exception {
+        assertThat(cjkCount(ACCIDENT_FORMULA)).as("事故原式中文数（实勘复算钉死）").isEqualTo(12);
+        assertThat(errorsOf(mutate(r -> knowledge(r, 2).put("formula", ACCIDENT_FORMULA)))).contains(
+                "V1/公式中文: knowledge[2].formula 公式含中文 12 字超出 5 字上限"
+                        + "（知识卡公式 58 号字渲染，中文整句右边界爆框截断）；中文说明请写入 claim/premise/trap，"
+                        + "公式内 \\text{} 只允许 1~4 字衔接词（如 在/且/或）");
+    }
+
     // ---- helpers ----
+
+    /** 中文码点数（V1Budget.isCjk 惯例口径：0x2e80-0x9fff ∪ 0xf900-0xfaff ∪ 0xff00-0xffef）。 */
+    private static int cjkCount(String value) {
+        int count = 0;
+        for (int cp : value.codePoints().toArray()) {
+            if ((cp >= 0x2e80 && cp <= 0x9fff) || (cp >= 0xf900 && cp <= 0xfaff)
+                    || (cp >= 0xff00 && cp <= 0xffef)) {
+                count++;
+            }
+        }
+        return count;
+    }
 
     /** 码点数（fit.ts [...tex].length 口径）。 */
     private static int codePointsOf(String value) {
@@ -293,6 +347,10 @@ class V1BudgetTest {
 
     private static ObjectNode step(ObjectNode root, int index) {
         return (ObjectNode) root.get("steps").get(index);
+    }
+
+    private static ObjectNode knowledge(ObjectNode root, int index) {
+        return (ObjectNode) root.get("knowledge").get(index);
     }
 
     private static ObjectNode pitfall(ObjectNode root, int index) {

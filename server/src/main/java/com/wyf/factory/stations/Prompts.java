@@ -120,6 +120,8 @@ public final class Prompts {
      * T29 公式宽度条款（derivation 单行短公式 ≤30 字符）——均逐字保留。
      * golden few-shot = template/src/data/content.json 的 steps 段确定性切片（金标本体字节零动，
      * PromptsDriftGuardTest 逐条目守护切片与金标一致）。
+     * <p>T31a 事故驱动（b91e247a）：卡片文字硬约束段追加 derivation 中文 ≤5 条款——
+     * 与 V1Budget R-宽度④ 同数值，整句中文说明一律写 statement/note（few-shot 示例段字节零动）。</p>
      */
     public static final String MATERIAL_CORE = """
             你是考研讲题视频的内容素材编辑。根据用户给的题目 JSON（{"problemType":...,"problem":{lines}，type="math" 的 value 是 LaTeX 源码）、骨架计划 plan（{"counts":{"steps":S},"anchors":[...]}，协调者已按全题统一规划）与术语表 glossary，产出讲题所需的解题步骤 steps（素材核心段）。只输出 {"steps":[...]} 本身，不要 markdown 代码块，不要解释。
@@ -152,6 +154,7 @@ public final class Prompts {
             卡片文字硬约束（防渲染溢出；实证多轮驳回同因，必须全部满足）：
             - 结论卡 = steps 最后一条的 derivation（画面以「结论」标签展示）：只允许一行短式最终结果，总长 ≤ 40 个字符，形状参考 a\\in[-\\sqrt{3},\\ \\sqrt{3}]；禁止多行推导、禁止换行、禁止 \\begin{aligned}、禁止长分式（\\frac 的分子或分母超过 4 个字符）
             - 每步 derivation 是单行短公式：TeX 源码不超过 30 个字符（如 -\\frac{1}{4} \\le t \\le 0 已是上限长度）；更长的推导必须拆成多个步骤/多条公式，禁止单条塞入整条不等式链或长表达式
+            - derivation 全程中文字符 ≤5：公式内 \\text{} 只允许 1~4 字衔接词（如 在/且/或），禁止把中文整句说明塞进公式；整句中文说明一律写 statement/note
             - 反例（实证驳回同因，禁止）：结论卡 derivation 写成长式，渲染时等号后折行（"z =" 与 "2" 拆成两行）
 
             示例（golden 素材 steps 段，题目：f(x)=x^{3}+ax^{2}+x 在 R 上单调递增求 a；plan：counts.steps=5，anchors=["L1","L2","L2","L3","L3"]）：
@@ -199,6 +202,8 @@ public final class Prompts {
      * 卡片文字硬约束（generalMethod/pitfalls 字数）、并列条件拆分（formula 单条件）。
      * golden few-shot = template/src/data/content.json 的三段确定性切片（金标本体字节零动，
      * PromptsDriftGuardTest 逐条目守护切片与金标一致）。
+     * <p>T31a 事故驱动（b91e247a）：卡片文字硬约束段追加 knowledge formula 中文 ≤5 条款——
+     * 与 V1Budget R-宽度④ 同数值，整句中文说明一律写 claim/premise/trap（few-shot 示例段字节零动）。</p>
      */
     public static final String MATERIAL_REST = """
             你是考研讲题视频的内容素材编辑。根据用户给的题目 JSON（{"problemType":...,"problem":{lines}，type="math" 的 value 是 LaTeX 源码）、骨架计划 plan（{"counts":{...},"anchors":[...]}，协调者已按全题统一规划）、术语表 glossary 与已定稿的解题步骤 steps（素材核心片产出，只作上下文，不得改动），产出讲题所需的三段周边素材。只输出 JSON 本身，不要 markdown 代码块，不要解释。
@@ -237,6 +242,7 @@ public final class Prompts {
             卡片文字硬约束（防渲染溢出；实证多轮驳回同因，必须全部满足）：
             - generalMethod 每条：step 以「≤6 字标签：说明」开头（如「识别：可导函数加区间单调」），step 整行 ≤ 24 字，trick ≤ 40 字，step 与 trick 内不放公式
             - pitfalls 每条：claim ≤ 20 字，why ≤ 40 字
+            - knowledge 的 formula 全程中文字符 ≤5：公式内 \\text{} 只允许 1~4 字衔接词（如 在/且/或），禁止把中文整句说明塞进公式；整句中文说明一律写 claim/premise/trap
             - 反例（实证驳回同因，禁止）：step/标签过长竖向拆行、卡片文字出缘
 
             示例（golden 素材三段，题目：f(x)=x^{3}+ax^{2}+x 在 R 上单调递增求 a；plan：counts={knowledge:3,pitfalls:2,generalMethod:3}，anchors=["L1","L2","L2","L3","L3"]；steps 成品随载荷给出，此处从略）：
@@ -293,7 +299,8 @@ public final class Prompts {
      * （原 SCRIPT 工位 prompt 的 scenes 规则段逐字迁移；新增口播与画面公式逐符号一致、
      * 并列条件拆分、逐步自验三条生成规则；few-shot = golden scenes 切片 s10..s14 逐字。
      * T29 事故 daf87d4c：popup formula 加单行短公式上限 31 字符——默认照抄 derivation，
-     * 照抄超长改写关键主式，与 V1 R-宽度③ 推演卡闸同数值。）
+     * 照抄超长改写关键主式，与 V1 R-宽度③ 推演卡闸同数值。T31a 事故 b91e247a：popup formula
+     * 追加中文 ≤5 条款（与既有 31 字符条款并排，与 V1 R-宽度④ 同数值）。）
      */
     public static final String SCENE = """
             你是考研讲题视频的场景分镜师。用户给你：题目 JSON（problem，type="math" 的 value 是 LaTeX 源码）、素材 JSON（material，四段）、本片场景清单 plan（{"id","act","component","stepRef"?} 数组，协调者已按全题统一规划，stepRef 仅 step-card/derivation-popup 携带）、术语表 glossary。只输出本片的 scenes 切片。只输出 JSON 本身，不要 markdown 代码块，不要解释。
@@ -312,7 +319,7 @@ public final class Prompts {
             - problem-card：props={}
             - knowledge-card：props={"knowledgeRef":N} → knowledge[N-1]（N 从 1 起）
             - step-card：props={"stepRef":N} → steps[N-1]
-            - derivation-popup：props={"stepRef":N,"formula":KaTeX 源码}，非空；formula 是单行短公式，TeX 源码不超过 31 个字符（如 -\\frac{1}{4} \\le t \\le 0 已是上限长度）——默认逐字符照抄 steps[N-1].derivation，照抄会超出 31 个字符时改写为该步推导的关键主式，禁止整条塞入长不等式链
+            - derivation-popup：props={"stepRef":N,"formula":KaTeX 源码}，非空；formula 是单行短公式，TeX 源码不超过 31 个字符（如 -\\frac{1}{4} \\le t \\le 0 已是上限长度）——默认逐字符照抄 steps[N-1].derivation，照抄会超出 31 个字符时改写为该步推导的关键主式，禁止整条塞入长不等式链，公式内中文字符 ≤5（\\text{} 只允许 1~4 字衔接词，禁止整句中文说明）
             - pitfall-card：props={"pitfallRef":N} → pitfalls[N-1]
             - checklist-card：props={"pitfallRefs":[N,...]}（非空数组，逐项不越界）
             - general-list：props={"itemRef":N} → generalMethod[N-1]
