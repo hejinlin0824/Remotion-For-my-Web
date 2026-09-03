@@ -35,7 +35,11 @@
 2. **GLM 端点**：coding-plan 套餐的 key 必须配 `APP_GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4`，
    否则稳定 429（无渠道，非瞬态）。标准 API key 不用加（默认 paas/v4）。
 
-密钥全部走环境变量（`ZHIPU_API_KEY` / `DASHSCOPE_API_KEY`），**绝不写进任何文件/日志/报告/对话**。
+密钥统一在一个文件管理：**`server/secrets.local.yml`**（gitignored，绝不入库）——
+`cp secrets.example.yml secrets.local.yml` 后填入两个真实 key（`glm.api-key` / `tts.api-key`，
+coding-plan 套餐再加 `glm.base-url` 行）；或等价用环境变量 `ZHIPU_API_KEY` / `DASHSCOPE_API_KEY`
+（优先级：env > 文件）。一键启动：`bash server/start-server.sh`（从该文件运行时提取注入 env，绝不打印）。
+**key 绝不写进任何入库文件/日志/报告/对话**。
 
 健康检查：`GET /` 返回内置单页 200，或 `GET /api/v1/jobs?size=1` 返回 200 JSON。
 

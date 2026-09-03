@@ -28,7 +28,17 @@ docs/        设计 spec 与实施计划
   `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`，路径不符的机器需改成实际浏览器路径
   （`template/scripts/qa_stills.mjs` 内镜像了同一路径常量，两处一起改） |
 
-## 密钥配置（关键：key 不入仓库，全靠环境变量）
+## 密钥配置（关键：全部 key 统一在一个文件管理）
+
+**唯一密钥源 = `server/secrets.local.yml`**（已被 .gitignore 忽略，绝不入库）：
+
+```bash
+cd server
+cp secrets.example.yml secrets.local.yml   # 然后编辑 secrets.local.yml 填入两个真实 key
+bash start-server.sh                        # 一键启动：自动从该文件提取 key 注入 env（运行时提取，绝不打印）
+```
+
+不想用脚本、手动 `export` 也等价（**优先级：环境变量 > secrets.local.yml**，取其一即可）：
 
 ```bash
 # GLM（智谱）。coding-plan 套餐的 key 必须配合 coding 端点，否则稳定 429：
@@ -39,8 +49,8 @@ export APP_GLM_BASE_URL="https://open.bigmodel.cn/api/coding/paas/v4"   # coding
 export DASHSCOPE_API_KEY="你的百炼key"
 ```
 
-> Windows 服务建议在启动前于同一 shell `export`（Git Bash）或 `$env:` （PowerShell）注入。
-> 也可用不入库的 `server/secrets.local.yml` 覆盖任意 `app.*` 配置（已被 .gitignore 忽略）。
+> 红线：key 绝不打印、绝不入 repo/日志/报告/对话。`secrets.local.yml` 里除两个 key 外还可放
+> `glm.base-url` 行（start-server.sh 会读取注入端点）；也可用不入库的该文件覆盖任意 `app.*` 配置。
 
 ## 部署与启动（clone 之后三步）
 
@@ -51,7 +61,7 @@ cd Remotion-For-my-Web
 # ① 模板依赖（node_modules 不入库，必须装）
 cd template && npm install && cd ..
 
-# ② 注入密钥（见上一节 export 两条）
+# ② 密钥：server/secrets.local.yml 已填好即免（见上一节；否则手动 export 两条）
 
 # ③ 启动服务（首次会自动建 H2 库 server/data/jobs）
 cd server
